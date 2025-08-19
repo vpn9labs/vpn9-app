@@ -1,0 +1,691 @@
+.logo.leptos:hover {
+  filter: drop-shadow(0 0 2em #a82e20);
+}
+:root {
+  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 400;
+
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* Login Page Styles */
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.login-card {
+  background-color: #ffffff;
+  border-radius: 16px;
+  padding: 30px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  max-width: 400px;
+  width: 100%;
+  text-align: center;
+}
+
+.logo-section {
+  margin-bottom: 30px;
+}
+
+.vpn9-logo {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #2563eb;
+  margin: 0;
+  letter-spacing: -0.5px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.login-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #374151;
+  margin: 0;
+  margin-bottom: 10px;
+}
+
+.input-group {
+  width: 100%;
+}
+
+.passphrase-input {
+  width: 100%;
+  padding: 12px 16px;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 16px; /* Prevents zoom on iOS */
+  font-family: 'Courier New', monospace;
+  background-color: #ffffff;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.passphrase-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.passphrase-input::placeholder {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.button-group {
+  width: 100%;
+  margin-top: 20px;
+}
+
+.login-button {
+  width: 100%;
+  padding: 14px 24px;
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, transform 0.1s;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.login-button:hover {
+  background-color: #1d4ed8;
+  transform: translateY(-1px);
+}
+
+.login-button:active {
+  transform: translateY(0);
+}
+
+.status-message {
+  font-size: 0.875rem;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.signup-section {
+  padding-top: 20px;
+}
+
+.signup-button {
+  width: 100%;
+  background: none;
+  border: none;
+  color: #2563eb;
+  background-color: #f3f4f6;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+
+.signup-button:hover {
+  color: #1d4ed8;
+}
+
+/* Authentication Styles */
+.authenticated-content {
+  text-align: center;
+}
+
+.welcome-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0 0 8px 0;
+}
+
+.auth-status {
+  color: #059669;
+  font-size: 0.875rem;
+  margin: 0 0 20px 0;
+  font-weight: 500;
+}
+
+.vpn-controls {
+  margin: 20px 0;
+}
+
+.coming-soon {
+  color: #64748b;
+  font-style: italic;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.logout-button {
+  width: 100%;
+  padding: 14px 24px;
+  background-color: #dc2626;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, transform 0.1s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.logout-button:hover {
+  background-color: #b91c1c;
+  transform: translateY(-1px);
+}
+
+.logout-button:active {
+  transform: translateY(0);
+}
+
+/* VPN Panel Styles */
+.vpn-panel {
+  background-color: #f8fafc;
+  border-radius: 12px;
+  padding: 24px;
+  border: 1px solid #e2e8f0;
+}
+
+.vpn-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0 0 20px 0;
+}
+
+.connection-status {
+  margin-bottom: 24px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: #ef4444;
+  transition: background-color 0.3s;
+}
+
+.status-indicator.connected .status-dot {
+  background-color: #10b981;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+.status-text {
+  font-weight: 500;
+  color: #334155;
+}
+
+.connection-info {
+  font-size: 0.875rem;
+  color: #64748b;
+  margin-left: 22px;
+}
+
+.server-selection {
+  margin-bottom: 24px;
+}
+
+.server-selection label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.server-select {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background-color: white;
+  font-size: 16px;
+  color: #1e293b;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 20px;
+  padding-right: 40px;
+}
+
+.server-select:hover:not(:disabled) {
+  border-color: #cbd5e1;
+}
+
+.server-select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.server-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.vpn-button-group {
+  display: flex;
+  justify-content: center;
+}
+
+.connect-button, .disconnect-button {
+  min-width: 140px;
+  padding: 12px 24px;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.connect-button {
+  background-color: #10b981;
+  color: white;
+}
+
+.connect-button:hover {
+  background-color: #059669;
+  transform: translateY(-1px);
+}
+
+.disconnect-button {
+  background-color: #ef4444;
+  color: white;
+}
+
+.disconnect-button:hover:not(:disabled) {
+  background-color: #dc2626;
+  transform: translateY(-1px);
+}
+
+.connect-button:active, .disconnect-button:active {
+  transform: translateY(0);
+}
+
+.connect-button:disabled, .disconnect-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: 0.75s;
+}
+
+.logo.tauri:hover {
+  filter: drop-shadow(0 0 2em #24c8db);
+}
+
+.row {
+  display: flex;
+  justify-content: center;
+}
+
+a {
+  font-weight: 500;
+  color: #646cff;
+  text-decoration: inherit;
+}
+
+a:hover {
+  color: #535bf2;
+}
+
+h1 {
+  text-align: center;
+}
+
+input,
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  color: #0f0f0f;
+  background-color: #ffffff;
+  transition: border-color 0.25s;
+  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #396cd8;
+}
+button:active {
+  border-color: #396cd8;
+  background-color: #e8e8e8;
+}
+
+input,
+button {
+  outline: none;
+}
+
+#greet-input {
+  margin-right: 5px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f6f6f6;
+    background-color: #111827;
+  }
+
+  a:hover {
+    color: #24c8db;
+  }
+
+  /* Dark mode login page styles */
+  .login-card {
+    background-color: #1f2937;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  }
+
+  .vpn9-logo {
+    color: #60a5fa;
+  }
+
+  .login-title {
+    color: #f3f4f6;
+  }
+
+  .passphrase-input {
+    background-color: #374151;
+    border-color: #4b5563;
+    color: #f3f4f6;
+  }
+
+  .passphrase-input:focus {
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
+  }
+
+  .passphrase-input::placeholder {
+    color: #9ca3af;
+  }
+
+  .login-button {
+    background-color: #2563eb;
+  }
+
+  .login-button:hover {
+    background-color: #3b82f6;
+  }
+
+  .status-message {
+    color: #d1d5db;
+  }
+
+  .signup-section {
+    border-top-color: #374151;
+  }
+
+  .signup-button {
+    color: #60a5fa;
+  }
+
+  .signup-button:hover {
+    color: #93c5fd;
+  }
+
+  /* Dark mode authentication styles */
+  .welcome-title {
+    color: #f1f5f9;
+  }
+
+  .auth-status {
+    color: #34d399;
+  }
+
+  .vpn-controls {
+    background-color: #0f172a;
+    border-color: #475569;
+  }
+
+  /* Dark mode VPN panel styles */
+  .vpn-panel {
+    background-color: #1e293b;
+    border-color: #334155;
+  }
+
+  .vpn-title {
+    color: #f1f5f9;
+  }
+
+  .status-text {
+    color: #e2e8f0;
+  }
+
+  .connection-info {
+    color: #94a3b8;
+  }
+
+  .server-selection label {
+    color: #cbd5e1;
+  }
+
+  .server-select {
+    background-color: #334155;
+    border-color: #475569;
+    color: #f1f5f9;
+  }
+
+  .server-select:hover:not(:disabled) {
+    border-color: #64748b;
+  }
+
+  .server-select:focus {
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
+  }
+
+  .coming-soon {
+    color: #94a3b8;
+  }
+
+  .logout-button {
+    background-color: #dc2626;
+  }
+
+  .logout-button:hover {
+    background-color: #ef4444;
+  }
+
+  /* Legacy styles for other components */
+  input,
+  button {
+    color: #ffffff;
+    background-color: #0f0f0f98;
+  }
+  button:active {
+    background-color: #0f0f0f69;
+  }
+}
+
+/* Mobile-specific adjustments */
+@media (max-width: 768px) {
+  :root {
+    font-size: 14px;
+  }
+
+  .login-card {
+    padding: 20px;
+    border-radius: 12px;
+    max-width: 100%;
+  }
+
+  .vpn9-logo {
+    font-size: 1.75rem;
+  }
+
+  .login-title {
+    font-size: 1.125rem;
+  }
+
+  .vpn-panel {
+    padding: 16px;
+  }
+
+  .logo-section {
+    margin-bottom: 20px;
+  }
+
+  .button-group {
+    margin-top: 16px;
+  }
+
+  input,
+  button,
+  select {
+    font-size: 16px !important; /* Prevent zoom on iOS */
+  }
+}
+
+/* Small mobile devices */
+@media (max-width: 375px) {
+  .login-card {
+    padding: 16px;
+  }
+
+  .vpn9-logo {
+    font-size: 1.5rem;
+  }
+
+  .login-title {
+    font-size: 1rem;
+  }
+
+  .connect-button,
+  .disconnect-button {
+    min-width: 120px;
+    padding: 10px 20px;
+  }
+}
+
+/* iOS specific fixes */
+@supports (-webkit-touch-callout: none) {
+  /* iOS only styles */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  .login-container {
+    min-height: -webkit-fill-available;
+  }
+
+  body {
+    min-height: -webkit-fill-available;
+  }
+}
+
+/* Landscape orientation adjustments */
+@media (max-height: 500px) and (orientation: landscape) {
+  .login-card {
+    padding: 20px;
+    margin: 10px auto;
+  }
+
+  .logo-section {
+    margin-bottom: 15px;
+  }
+
+  .vpn9-logo {
+    font-size: 1.5rem;
+  }
+
+  .login-form {
+    gap: 15px;
+  }
+
+  .button-group {
+    margin-top: 15px;
+  }
+}
