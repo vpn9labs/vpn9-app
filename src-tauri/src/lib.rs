@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use keyring::Entry;
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -183,14 +183,14 @@ struct TokenStorage {
 }
 
 fn get_token_file_path() -> Result<PathBuf, String> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "Could not determine config directory".to_string())?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| "Could not determine config directory".to_string())?;
     let app_dir = config_dir.join("vpn9-client");
-    
+
     // Create directory if it doesn't exist
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config directory: {}", e))?;
-    
+
     Ok(app_dir.join(".tokens"))
 }
 
@@ -201,31 +201,33 @@ fn simple_encrypt(data: &str, key: &str) -> String {
     hasher.update(key.as_bytes());
     hasher.update(b"vpn9-client-salt-2024");
     let key_hash = hasher.finalize();
-    
-    let encrypted: Vec<u8> = data.bytes()
+
+    let encrypted: Vec<u8> = data
+        .bytes()
         .zip(key_hash.iter().cycle())
         .map(|(d, k)| d ^ k)
         .collect();
-    
+
     general_purpose::STANDARD.encode(encrypted)
 }
 
 fn simple_decrypt(encrypted: &str, key: &str) -> Result<String, String> {
-    let data = general_purpose::STANDARD.decode(encrypted)
+    let data = general_purpose::STANDARD
+        .decode(encrypted)
         .map_err(|e| format!("Failed to decode encrypted data: {}", e))?;
-    
+
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     hasher.update(b"vpn9-client-salt-2024");
     let key_hash = hasher.finalize();
-    
-    let decrypted: Vec<u8> = data.iter()
+
+    let decrypted: Vec<u8> = data
+        .iter()
         .zip(key_hash.iter().cycle())
         .map(|(d, k)| d ^ k)
         .collect();
-    
-    String::from_utf8(decrypted)
-        .map_err(|e| format!("Failed to decrypt data: {}", e))
+
+    String::from_utf8(decrypted).map_err(|e| format!("Failed to decrypt data: {}", e))
 }
 
 fn get_keyring_entry(key: &str) -> Result<Entry, String> {
@@ -248,24 +250,25 @@ async fn store_tokens_to_keyring(access_token: &str, refresh_token: &str) -> Res
 
 async fn store_tokens_to_file(access_token: &str, refresh_token: &str) -> Result<(), String> {
     let file_path = get_token_file_path()?;
-    
+
     // Get a machine-specific key for encryption
-    let machine_id = get_os_machine_id().await
+    let machine_id = get_os_machine_id()
+        .await
         .unwrap_or_else(|_| "fallback-key".to_string());
-    
+
     let storage = TokenStorage {
         access_token: simple_encrypt(access_token, &machine_id),
         refresh_token: simple_encrypt(refresh_token, &machine_id),
         encrypted: true,
     };
-    
+
     let json = serde_json::to_string(&storage)
         .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
-    
+
     tokio::fs::write(&file_path, json)
         .await
         .map_err(|e| format!("Failed to write token file: {}", e))?;
-    
+
     // Set restrictive permissions on Unix systems
     #[cfg(unix)]
     {
@@ -277,7 +280,7 @@ async fn store_tokens_to_file(access_token: &str, refresh_token: &str) -> Result
         std::fs::set_permissions(&file_path, permissions)
             .map_err(|e| format!("Failed to set file permissions: {}", e))?;
     }
-    
+
     Ok(())
 }
 
@@ -287,12 +290,18 @@ async fn store_tokens(access_token: &str, refresh_token: &str) -> Result<(), Str
         Ok(_) => {
             debug!("Tokens stored in keyring");
             Ok(())
-        },
+        }
         Err(keyring_err) => {
             // Fallback to file storage
             debug!("Keyring failed: {}, using file storage", keyring_err);
-            store_tokens_to_file(access_token, refresh_token).await
-                .map_err(|e| format!("Both keyring and file storage failed. Keyring: {}, File: {}", keyring_err, e))
+            store_tokens_to_file(access_token, refresh_token)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Both keyring and file storage failed. Keyring: {}, File: {}",
+                        keyring_err, e
+                    )
+                })
         }
     }
 }
@@ -313,18 +322,19 @@ async fn get_tokens_from_keyring() -> Result<(String, String), String> {
 
 async fn get_tokens_from_file() -> Result<(String, String), String> {
     let file_path = get_token_file_path()?;
-    
+
     let json = tokio::fs::read_to_string(&file_path)
         .await
         .map_err(|e| format!("Failed to read token file: {}", e))?;
-    
-    let storage: TokenStorage = serde_json::from_str(&json)
-        .map_err(|e| format!("Failed to parse token file: {}", e))?;
-    
+
+    let storage: TokenStorage =
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse token file: {}", e))?;
+
     if storage.encrypted {
-        let machine_id = get_os_machine_id().await
+        let machine_id = get_os_machine_id()
+            .await
             .unwrap_or_else(|_| "fallback-key".to_string());
-        
+
         let access_token = simple_decrypt(&storage.access_token, &machine_id)?;
         let refresh_token = simple_decrypt(&storage.refresh_token, &machine_id)?;
         Ok((access_token, refresh_token))
@@ -347,7 +357,7 @@ async fn get_stored_tokens() -> Result<(String, String), String> {
 async fn clear_stored_tokens() -> Result<(), String> {
     // Try to clear from both storage mechanisms
     let mut errors = Vec::new();
-    
+
     // Clear keyring
     if let Ok(access_entry) = get_keyring_entry("access_token") {
         let _ = access_entry.delete_password();
@@ -355,7 +365,7 @@ async fn clear_stored_tokens() -> Result<(), String> {
     if let Ok(refresh_entry) = get_keyring_entry("refresh_token") {
         let _ = refresh_entry.delete_password();
     }
-    
+
     // Clear file
     if let Ok(file_path) = get_token_file_path() {
         if let Err(e) = tokio::fs::remove_file(&file_path).await {
@@ -364,7 +374,7 @@ async fn clear_stored_tokens() -> Result<(), String> {
             }
         }
     }
-    
+
     if !errors.is_empty() {
         Err(errors.join(", "))
     } else {
