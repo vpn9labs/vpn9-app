@@ -65,7 +65,7 @@ async fn get_device_id(app: tauri::AppHandle) -> Result<String, String> {
 async fn get_os_machine_id() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        use winreg::prelude::*;
+        use winreg::{enums::*, RegKey};
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         let crypto_key = hklm
             .open_subkey("SOFTWARE\\Microsoft\\Cryptography")
