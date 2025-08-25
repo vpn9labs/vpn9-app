@@ -19,7 +19,11 @@ jobs:
     env:
       # Speed up Rust builds
       RUSTC_WRAPPER: sccache
+      # Default to GitHub Cache backend for cross-run speedups
       SCCACHE_GHA_ENABLED: "true"
+      # Keep local cache settings as a fallback/temporary storage
+      SCCACHE_DIR: ~/.cache/sccache
+      SCCACHE_CACHE_SIZE: 1G
       CARGO_INCREMENTAL: 0
     steps:
       - name: Checkout
@@ -36,7 +40,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: sccache cache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
