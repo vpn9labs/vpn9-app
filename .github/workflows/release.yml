@@ -16,19 +16,73 @@ jobs:
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
+    env:
+      # Speed up Rust builds
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: 0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install trunk and tauri-cli
-        run: |
-          cargo install trunk
-          cargo install tauri-cli --locked
+      - name: sccache cache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            . -> target
+            src-tauri -> src-tauri/target
+
+      - name: Install trunk
+        run: cargo install trunk --locked
+
+      - name: Cache Trunk tools (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trunk
+          key: trunk-${{ runner.os }}-v1
+          restore-keys: |
+            trunk-${{ runner.os }}-
+
+      - name: Cache Trunk tools (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/trunk
+          key: trunk-${{ runner.os }}-v1
+          restore-keys: |
+            trunk-${{ runner.os }}-
+
+      - name: Cache Trunk tools (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\trunk
+          key: trunk-${{ runner.os }}-v1
+          restore-keys: |
+            trunk-${{ runner.os }}-
+
+      - name: Cache npm (for tauri-action CLI install)
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-cache-v1
+          restore-keys: |
+            ${{ runner.os }}-npm-cache-
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-latest'
@@ -58,4 +112,3 @@ jobs:
           releaseBody: "Automated release built by GitHub Actions."
           releaseDraft: false
           prerelease: false
-
