@@ -1,7 +1,7 @@
 # VPN9 App
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" alt="VPN9 Logo" width="128" height="128">
+  <img src="src-tauri/icons/vpn9.png" alt="VPN9 Logo" width="128" height="128">
 </p>
 
 <p align="center">
