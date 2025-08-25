@@ -259,10 +259,7 @@ This project is licensed under the GNU Affero General Public License v3.0 (AGPLv
 
 ## Support
 
-- **Documentation**: [docs.vpn9.com](https://docs.vpn9.com)
 - **Issues**: [GitHub Issues](https://github.com/vpn9/vpn9-app/issues)
-- **Community**: [Discord](https://discord.gg/vpn9)
-- **Email**: support@vpn9.com
 
 ## Acknowledgments
 
