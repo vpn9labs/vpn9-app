@@ -2,6 +2,13 @@
 name = "vpn9-app-ui"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/vpn9/vpn9-app"
+homepage = "https://vpn9.com"
+documentation = "https://github.com/vpn9/vpn9-app#readme"
+readme = "README.md"
+categories = ["gui", "web-programming", "wasm"]
+keywords = ["vpn", "tauri", "leptos", "wasm", "desktop"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]

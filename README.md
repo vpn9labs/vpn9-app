@@ -238,6 +238,10 @@ Three-tier device identification system:
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3). See the `LICENSE` file for the full license text. By contributing, you agree that your contributions are licensed under the same terms.
+
 ### Development Setup
 
 1. Fork the repository
@@ -252,10 +256,6 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 - Use `cargo clippy` for linting
 - Write tests for new features
 - Update documentation as needed
-
-## License
-
-VPN9 App is open-source software. See [LICENSE](LICENSE) file for details.
 
 ## Support
 
