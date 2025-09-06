@@ -1,10 +1,8 @@
-use js_sys;
 use leptos::task::spawn_local;
 use leptos::{ev::SubmitEvent, prelude::*};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
-use wasm_bindgen_futures;
 
 #[wasm_bindgen]
 extern "C" {
@@ -19,8 +17,6 @@ extern "C" {
 #[derive(Debug, Deserialize)]
 struct LoginSuccessPayload {
     message: String,
-    subscription_status: String,
-    subscription_expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +61,7 @@ enum VpnConnectionState {
 struct VpnServer {
     id: String,
     name: String,
-    country: String,
+    country_code: String,
     city: String,
     load: f32,
 }
@@ -92,7 +88,7 @@ fn VpnConnectionPanel() -> impl IntoView {
                 }
             }
             Err(e) => {
-                set_connection_info.set(format!("Error loading servers: {}", e));
+                set_connection_info.set(format!("Error loading servers: {e}"));
             }
         }
     });
@@ -116,13 +112,13 @@ fn VpnConnectionPanel() -> impl IntoView {
             .unwrap();
 
             match invoke_tauri_command("vpn_connect", args).await {
-                Ok(response) => {
+                Ok(_) => {
                     set_connection_state.set(VpnConnectionState::Connected);
                     set_connection_info.set(format!("Connected to {}", server.name));
                 }
                 Err(e) => {
                     set_connection_state.set(VpnConnectionState::Error(e.clone()));
-                    set_connection_info.set(format!("Connection failed: {}", e));
+                    set_connection_info.set(format!("Connection failed: {e}"));
                 }
             }
         });
@@ -143,7 +139,7 @@ fn VpnConnectionPanel() -> impl IntoView {
                 }
                 Err(e) => {
                     set_connection_state.set(VpnConnectionState::Error(e.clone()));
-                    set_connection_info.set(format!("Disconnect failed: {}", e));
+                    set_connection_info.set(format!("Disconnect failed: {e}"));
                 }
             }
         });
@@ -194,7 +190,7 @@ fn VpnConnectionPanel() -> impl IntoView {
                         children=move |server| {
                             view! {
                                 <option value={server.id.clone()}>
-                                    {format!("{} - {} ({:.0}% load)", server.name, server.city, server.load)}
+                                    {format!("{} - {}, {} ({:.0}% load)", server.name, server.city, server.country_code, server.load)}
                                 </option>
                             }
                         }
@@ -266,23 +262,23 @@ pub fn App() -> impl IntoView {
         ev.prevent_default();
 
         let passphrase_value = passphrase.get_untracked();
-        let set_login_status = set_login_status.clone();
-        let set_is_authenticated = set_is_authenticated.clone();
+        let set_login_status = set_login_status;
+        let set_is_authenticated = set_is_authenticated;
 
         spawn_local(async move {
             // Clear any previous status
             set_login_status.set("Authenticating with VPN9 servers...".to_string());
 
             // Create closures for event handlers
-            let set_status_clone = set_login_status.clone();
+            let set_status_clone = set_login_status;
             let status_handler = Closure::wrap(Box::new(move |event: JsValue| {
                 if let Some(payload) = event.as_string() {
                     set_status_clone.set(payload);
                 }
             }) as Box<dyn FnMut(JsValue)>);
 
-            let set_status_error = set_login_status.clone();
-            let set_auth_error = set_is_authenticated.clone();
+            let set_status_error = set_login_status;
+            let set_auth_error = set_is_authenticated;
             let error_handler = Closure::wrap(Box::new(move |event: JsValue| {
                 // Parse the event payload
                 if let Ok(payload_obj) = js_sys::Reflect::get(&event, &"payload".into()) {
@@ -297,8 +293,8 @@ pub fn App() -> impl IntoView {
                 }
             }) as Box<dyn FnMut(JsValue)>);
 
-            let set_status_success = set_login_status.clone();
-            let set_auth_success = set_is_authenticated.clone();
+            let set_status_success = set_login_status;
+            let set_auth_success = set_is_authenticated;
             let success_handler = Closure::wrap(Box::new(move |event: JsValue| {
                 // Parse the event payload
                 if let Ok(payload_obj) = js_sys::Reflect::get(&event, &"payload".into()) {
@@ -347,7 +343,7 @@ pub fn App() -> impl IntoView {
                     set_passphrase.set(String::new());
                 }
                 Err(error) => {
-                    set_login_status.set(format!("Logout failed: {}", error));
+                    set_login_status.set(format!("Logout failed: {error}"));
                 }
             }
         });
