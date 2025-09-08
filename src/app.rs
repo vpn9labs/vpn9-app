@@ -295,6 +295,7 @@ pub fn App() -> impl IntoView {
 
             let set_status_success = set_login_status;
             let set_auth_success = set_is_authenticated;
+            let set_passphrase_success = set_passphrase;
             let success_handler = Closure::wrap(Box::new(move |event: JsValue| {
                 // Parse the event payload
                 if let Ok(payload_obj) = js_sys::Reflect::get(&event, &"payload".into()) {
@@ -304,6 +305,8 @@ pub fn App() -> impl IntoView {
                             {
                                 set_status_success.set(payload.message);
                                 set_auth_success.set(true);
+                                // Clear passphrase from input/state on success
+                                set_passphrase_success.set(String::new());
                             }
                         }
                     }
@@ -414,7 +417,7 @@ pub fn App() -> impl IntoView {
                         <form on:submit=handle_login>
                             <div class="input-group">
                                 <input
-                                    type="text"
+                                    type="password"
                                     id="passphrase-input"
                                     class="passphrase-input"
                                     placeholder="xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx"

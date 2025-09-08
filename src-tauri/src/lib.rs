@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use keyring::Entry;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -16,8 +17,6 @@ fn short_hash(input: &str) -> String {
     // first 8 hex chars is enough for correlation without leaking the value
     format!("{:x}", out)[..8].to_string()
 }
-
-
 
 // --- Optional AEAD-encrypted file fallback (feature: file-fallback-aead) ---
 #[cfg(feature = "file-fallback-aead")]
@@ -57,7 +56,9 @@ mod aead_fallback {
         rand::thread_rng().fill_bytes(&mut salt);
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
 
-        let machine_id = get_os_machine_id().await.unwrap_or_else(|_| "fallback".to_string());
+        let machine_id = get_os_machine_id()
+            .await
+            .unwrap_or_else(|_| "fallback".to_string());
         let key = derive_key(&machine_id, &salt)?;
         let cipher = ChaCha20Poly1305::new(&key);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -106,8 +107,8 @@ mod aead_fallback {
         let json = tokio::fs::read_to_string(&file_path)
             .await
             .map_err(|e| format!("Failed to read token file: {}", e))?;
-        let file: AeadTokenFile =
-            serde_json::from_str(&json).map_err(|e| format!("Failed to parse token file: {}", e))?;
+        let file: AeadTokenFile = serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse token file: {}", e))?;
 
         let salt = general_purpose::STANDARD
             .decode(file.salt)
@@ -119,7 +120,9 @@ mod aead_fallback {
             .decode(file.ct)
             .map_err(|e| format!("Failed to decode ciphertext: {}", e))?;
 
-        let machine_id = get_os_machine_id().await.unwrap_or_else(|_| "fallback".to_string());
+        let machine_id = get_os_machine_id()
+            .await
+            .unwrap_or_else(|_| "fallback".to_string());
         let key = derive_key(&machine_id, &salt)?;
         let cipher = ChaCha20Poly1305::new(&key);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -349,7 +352,10 @@ async fn store_tokens(access_token: &str, refresh_token: &str) -> Result<(), Str
         Err(e) => {
             #[cfg(feature = "file-fallback-aead")]
             {
-                warn!("event=tokens.store keyring_failed using=aead_file err={}", e);
+                warn!(
+                    "event=tokens.store keyring_failed using=aead_file err={}",
+                    e
+                );
                 aead_fallback::store_tokens_to_file_aead(access_token, refresh_token).await?;
                 debug!("event=tokens.store backend=aead_file");
                 Ok(())
@@ -382,7 +388,10 @@ async fn get_stored_tokens() -> Result<(String, String), String> {
         Err(e) => {
             #[cfg(feature = "file-fallback-aead")]
             {
-                debug!("event=tokens.read keyring_failed trying=aead_file err={}", e);
+                debug!(
+                    "event=tokens.read keyring_failed trying=aead_file err={}",
+                    e
+                );
                 aead_fallback::get_tokens_from_file_aead().await
             }
             #[cfg(not(feature = "file-fallback-aead"))]
@@ -393,6 +402,71 @@ async fn get_stored_tokens() -> Result<(String, String), String> {
     }
 }
 
+fn parse_jwt_claims(token: &str) -> Result<TokenClaims, String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid JWT format".to_string());
+    }
+    let payload_b64 = parts[1];
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|e| format!("Failed to base64url-decode JWT payload: {}", e))?;
+    serde_json::from_slice::<TokenClaims>(&payload)
+        .map_err(|e| format!("Failed to parse JWT claims: {}", e))
+}
+
+fn is_jwt_expired(token: &str, skew_seconds: i64) -> Result<bool, String> {
+    let claims = parse_jwt_claims(token)?;
+    let exp = claims.exp as i64;
+    let now = chrono::Utc::now().timestamp();
+    Ok(exp <= now + skew_seconds)
+}
+
+async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, String> {
+    let (access_token, _refresh_token) = get_stored_tokens()
+        .await
+        .map_err(|e| format!("Not authenticated: {}", e))?;
+
+    // Proactive refresh if token appears expired (with small skew)
+    if let Ok(true) = is_jwt_expired(&access_token, 30) {
+        let _ = refresh_token().await; // Ignore message; errors handled by retry below
+    }
+
+    // Load (possibly refreshed) token
+    let (access_token, _) = get_stored_tokens()
+        .await
+        .map_err(|e| format!("Not authenticated: {}", e))?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    if resp.status().as_u16() != 401 {
+        return Ok(resp);
+    }
+
+    // 401 -> try refresh once, then retry
+    let _ = refresh_token().await?;
+    let (new_access, _) = get_stored_tokens().await?;
+    let retry = client
+        .get(url)
+        .header("Authorization", format!("Bearer {}", new_access))
+        .send()
+        .await
+        .map_err(|e| format!("Network error after refresh: {}", e))?;
+
+    if retry.status().as_u16() == 401 {
+        // Clear tokens to force re-login path
+        let _ = clear_stored_tokens().await;
+        return Err("Unauthorized. Please login again.".to_string());
+    }
+
+    Ok(retry)
+}
 
 async fn clear_stored_tokens() -> Result<(), String> {
     // Clear from keyring (ignore missing entries)
@@ -638,10 +712,20 @@ async fn get_auth_status() -> Result<HashMap<String, String>, String> {
     let mut status = HashMap::new();
 
     match get_stored_tokens().await {
-        Ok((_access_token, _refresh_token)) => {
-            // TODO: Decode JWT to check expiration
-            // For now, just check if tokens exist
-            status.insert("authenticated".to_string(), "true".to_string());
+        Ok((access_token, _refresh_token)) => {
+            // Decode JWT and check exp
+            let expired = match is_jwt_expired(&access_token, 0) {
+                Ok(v) => v,
+                Err(_) => true,
+            };
+            status.insert(
+                "authenticated".to_string(),
+                if expired {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                },
+            );
             status.insert("token_present".to_string(), "true".to_string());
         }
         Err(_) => {
@@ -704,31 +788,8 @@ async fn vpn_disconnect() -> Result<String, String> {
 async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
     info!("event=relays.fetch.start");
 
-    // Get stored access token
-    let (access_token, _) = get_stored_tokens()
-        .await
-        .map_err(|e| format!("Not authenticated: {}", e))?;
-
-    // Fetch actual server list from API
-    let client = reqwest::Client::new();
-    let response = match client
-        .get("https://vpn9.com/api/v1/relays")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            let error_msg = if e.is_connect() {
-                "Cannot connect to VPN9 servers. Please check your internet connection.".to_string()
-            } else if e.is_timeout() {
-                "Connection to VPN9 servers timed out. Please try again.".to_string()
-            } else {
-                format!("Network error: {}", e)
-            };
-            return Err(error_msg);
-        }
-    };
+    // Fetch actual server list from API with auto-refresh on 401
+    let response = authorized_get_with_refresh("https://vpn9.com/api/v1/relays").await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -902,8 +963,7 @@ pub fn run() {
     let log_plugin = tauri_plugin_log::Builder::new()
         .level(level)
         .format(|out, message, record| {
-            let ts = chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             // Build a compact JSON line
             let obj = serde_json::json!({
                 "ts": ts,

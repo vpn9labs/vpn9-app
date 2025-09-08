@@ -40,6 +40,7 @@ keyring = "2.0"
 tauri-plugin-log = "2"
 log = "0.4.27"
 dirs = "5.0"
+base64 = "0.21"
 
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
@@ -51,7 +52,6 @@ default = []
 file-fallback-aead = [
   "dep:chacha20poly1305",
   "dep:hkdf",
-  "dep:base64",
   "dep:rand",
 ]
 
@@ -61,10 +61,6 @@ optional = true
 
 [dependencies.hkdf]
 version = "0.12"
-optional = true
-
-[dependencies.base64]
-version = "0.21"
 optional = true
 
 [dependencies.rand]
