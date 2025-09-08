@@ -350,7 +350,6 @@ pub fn App() -> impl IntoView {
     };
 
     let open_signup = move |_| {
-        println!("Opening signup page");
         // Open signup page in external browser using custom Tauri command
         spawn_local(async move {
             let url = "https://vpn9.com/signup";

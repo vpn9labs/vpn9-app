@@ -3,11 +3,20 @@ use std::path::PathBuf;
 
 use base64::{engine::general_purpose, Engine as _};
 use keyring::Entry;
-use log::debug;
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Emitter;
 use uuid::Uuid;
+
+// --- Logging helpers (sanitize + structure) ---
+fn short_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let out = hasher.finalize();
+    // first 8 hex chars is enough for correlation without leaking the value
+    format!("{:x}", out)[..8].to_string()
+}
 
 // Authentication data structures
 #[derive(Debug, Serialize, Deserialize)]
@@ -398,7 +407,7 @@ struct LoginErrorPayload {
 // Authentication functions
 #[tauri::command]
 async fn login(passphrase: String, app: tauri::AppHandle) {
-    debug!("login command");
+    info!("event=login.start");
 
     // Emit initial status
     let _ = app.emit("login-status", "Authenticating with VPN9 servers...");
@@ -428,9 +437,12 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
         }
     };
     let device_name = get_device_name();
-    debug!("passphrase: {passphrase}");
-    debug!("device id: {device_id}");
-    debug!("device name: {device_name}");
+    // Do not log secrets. Provide only safe, structured context.
+    info!(
+        "event=login.device_info device_id_hash={} device_name_len={}",
+        short_hash(&device_id),
+        device_name.len()
+    );
 
     // Prepare authentication request
     let auth_request = AuthRequest {
@@ -503,7 +515,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
         debug!("response is success");
     }
 
-    // Get the response text first for debugging
+    // Get the response text without logging sensitive contents
     let response_text = match response.text().await {
         Ok(text) => text,
         Err(e) => {
@@ -516,9 +528,11 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
             return;
         }
     };
-
-    // Print the raw response for debugging
-    println!("Raw server response: {}", response_text);
+    // Log only metadata, not the payload (may contain tokens)
+    debug!(
+        "event=login.response received_bytes={} json_parse_attempt=true",
+        response_text.len()
+    );
 
     let auth_response: AuthResponse = match serde_json::from_str(&response_text) {
         Ok(resp) => resp,
@@ -631,7 +645,7 @@ fn get_device_name() -> String {
 // VPN connection commands
 #[tauri::command]
 async fn vpn_connect(server_id: String, _app: tauri::AppHandle) -> Result<String, String> {
-    debug!("Connecting to VPN server: {}", server_id);
+    info!("event=vpn.connect.start server_id={}", server_id);
 
     // Get stored access token
     let (_access_token, _) = get_stored_tokens()
@@ -651,7 +665,7 @@ async fn vpn_connect(server_id: String, _app: tauri::AppHandle) -> Result<String
 
 #[tauri::command]
 async fn vpn_disconnect() -> Result<String, String> {
-    debug!("Disconnecting from VPN");
+    info!("event=vpn.disconnect.start");
 
     // TODO: Implement actual VPN disconnection logic
     // This would typically involve:
@@ -664,7 +678,7 @@ async fn vpn_disconnect() -> Result<String, String> {
 
 #[tauri::command]
 async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
-    debug!("Fetching VPN servers");
+    info!("event=relays.fetch.start");
 
     // Get stored access token
     let (access_token, _) = get_stored_tokens()
@@ -701,17 +715,18 @@ async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
         ));
     }
 
-    // Get the response text first for debugging
+    // Get the response text without logging sensitive contents
     let response_text = match response.text().await {
         Ok(text) => text,
         Err(e) => {
             return Err(format!("Failed to read response: {}", e));
         }
     };
-
-    // Print the raw JSON response for debugging
-    println!("VPN9 API /api/v1/relays response:");
-    println!("{}", response_text);
+    // Log only metadata, not the payload
+    debug!(
+        "event=relays.response received_bytes={} json_parse_attempt=true",
+        response_text.len()
+    );
 
     // Parse the JSON response with the expected structure
     let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
@@ -789,7 +804,7 @@ async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
 
     // If no servers were found, use mock data as fallback
     if servers.is_empty() {
-        println!("No servers returned from API, using mock data");
+        warn!("event=relays.empty using=mock_data");
         let mock_servers = vec![
             serde_json::json!({
                 "id": "us-east-1",
@@ -823,7 +838,7 @@ async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
         return Ok(mock_servers);
     }
 
-    println!("Parsed {} servers from API response", servers.len());
+    info!("event=relays.parsed count={}", servers.len());
     Ok(servers)
 }
 
@@ -853,8 +868,34 @@ async fn open_url(url: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Configure logging: JSON format, level by environment (dev vs prod)
+    let level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+
+    let log_plugin = tauri_plugin_log::Builder::new()
+        .level(level)
+        .format(|out, message, record| {
+            let ts = chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            // Build a compact JSON line
+            let obj = serde_json::json!({
+                "ts": ts,
+                "level": record.level().to_string().to_lowercase(),
+                "target": record.target(),
+                "module_path": record.module_path(),
+                "file": record.file(),
+                "line": record.line(),
+                "msg": message.to_string(),
+            });
+            out.finish(format_args!("{}", obj.to_string()))
+        })
+        .build();
+
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(log_plugin)
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
