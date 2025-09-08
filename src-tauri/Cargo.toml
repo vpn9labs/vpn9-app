@@ -36,7 +36,6 @@ sysinfo = "0.30"
 reqwest = { version = "0.11", features = ["json"] }
 jsonwebtoken = "9"
 chrono = { version = "0.4", features = ["serde"] }
-base64 = "0.21"
 keyring = "2.0"
 tauri-plugin-log = "2"
 log = "0.4.27"
@@ -45,3 +44,29 @@ dirs = "5.0"
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
 winreg = "0.50"
+
+[features]
+default = []
+# Optional encrypted file fallback for tokens when keyring is unavailable
+file-fallback-aead = [
+  "dep:chacha20poly1305",
+  "dep:hkdf",
+  "dep:base64",
+  "dep:rand",
+]
+
+[dependencies.chacha20poly1305]
+version = "0.10"
+optional = true
+
+[dependencies.hkdf]
+version = "0.12"
+optional = true
+
+[dependencies.base64]
+version = "0.21"
+optional = true
+
+[dependencies.rand]
+version = "0.8"
+optional = true

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use base64::{engine::general_purpose, Engine as _};
 use keyring::Entry;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -18,6 +17,133 @@ fn short_hash(input: &str) -> String {
     format!("{:x}", out)[..8].to_string()
 }
 
+
+
+// --- Optional AEAD-encrypted file fallback (feature: file-fallback-aead) ---
+#[cfg(feature = "file-fallback-aead")]
+mod aead_fallback {
+    use super::*;
+    use base64::{engine::general_purpose, Engine as _};
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use hkdf::Hkdf;
+    use rand::RngCore;
+
+    #[derive(Serialize, Deserialize)]
+    struct AeadTokenFile {
+        v: u8,
+        salt: String,
+        nonce: String,
+        ct: String,
+    }
+
+    fn derive_key(machine_id: &str, salt: &[u8]) -> Result<Key, String> {
+        let hk = Hkdf::<Sha256>::new(Some(salt), machine_id.as_bytes());
+        let mut okm = [0u8; 32];
+        hk.expand(b"vpn9-aead-token-key-v1", &mut okm)
+            .map_err(|_| "HKDF expand failed".to_string())?;
+        Ok(Key::from_slice(&okm).clone())
+    }
+
+    pub async fn store_tokens_to_file_aead(
+        access_token: &str,
+        refresh_token: &str,
+    ) -> Result<(), String> {
+        let file_path = get_token_file_path()?;
+
+        // Random salt and nonce
+        let mut salt = [0u8; 16];
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut salt);
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
+        let machine_id = get_os_machine_id().await.unwrap_or_else(|_| "fallback".to_string());
+        let key = derive_key(&machine_id, &salt)?;
+        let cipher = ChaCha20Poly1305::new(&key);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Prepare plaintext as JSON
+        let pt = serde_json::to_vec(&serde_json::json!({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+        }))
+        .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
+
+        let ct = cipher
+            .encrypt(nonce, pt.as_slice())
+            .map_err(|_| "AEAD encryption failed".to_string())?;
+
+        let file = AeadTokenFile {
+            v: 1,
+            salt: general_purpose::STANDARD.encode(salt),
+            nonce: general_purpose::STANDARD.encode(nonce_bytes),
+            ct: general_purpose::STANDARD.encode(ct),
+        };
+
+        let json = serde_json::to_string(&file)
+            .map_err(|e| format!("Failed to serialize token file: {}", e))?;
+
+        tokio::fs::write(&file_path, json)
+            .await
+            .map_err(|e| format!("Failed to write token file: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&file_path)
+                .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&file_path, permissions)
+                .map_err(|e| format!("Failed to set file permissions: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_tokens_from_file_aead() -> Result<(String, String), String> {
+        let file_path = get_token_file_path()?;
+        let json = tokio::fs::read_to_string(&file_path)
+            .await
+            .map_err(|e| format!("Failed to read token file: {}", e))?;
+        let file: AeadTokenFile =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse token file: {}", e))?;
+
+        let salt = general_purpose::STANDARD
+            .decode(file.salt)
+            .map_err(|e| format!("Failed to decode salt: {}", e))?;
+        let nonce_bytes = general_purpose::STANDARD
+            .decode(file.nonce)
+            .map_err(|e| format!("Failed to decode nonce: {}", e))?;
+        let ct = general_purpose::STANDARD
+            .decode(file.ct)
+            .map_err(|e| format!("Failed to decode ciphertext: {}", e))?;
+
+        let machine_id = get_os_machine_id().await.unwrap_or_else(|_| "fallback".to_string());
+        let key = derive_key(&machine_id, &salt)?;
+        let cipher = ChaCha20Poly1305::new(&key);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let pt = cipher
+            .decrypt(nonce, ct.as_slice())
+            .map_err(|_| "AEAD decryption failed".to_string())?;
+
+        let val: serde_json::Value =
+            serde_json::from_slice(&pt).map_err(|e| format!("Failed to parse plaintext: {}", e))?;
+        let access_token = val
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing access_token".to_string())?
+            .to_string();
+        let refresh_token = val
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Missing refresh_token".to_string())?
+            .to_string();
+
+        Ok((access_token, refresh_token))
+    }
+}
 // Authentication data structures
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthRequest {
@@ -182,14 +308,7 @@ async fn get_hardware_fingerprint() -> Result<String, String> {
     Ok(format!("{:x}", hash)[..16].to_string())
 }
 
-// Token storage with fallback mechanism
-#[derive(Serialize, Deserialize)]
-struct TokenStorage {
-    access_token: String,
-    refresh_token: String,
-    // Store as base64 encoded encrypted data
-    encrypted: bool,
-}
+// Token storage (keyring only)
 
 fn get_token_file_path() -> Result<PathBuf, String> {
     let config_dir =
@@ -201,42 +320,6 @@ fn get_token_file_path() -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to create config directory: {}", e))?;
 
     Ok(app_dir.join(".tokens"))
-}
-
-fn simple_encrypt(data: &str, key: &str) -> String {
-    // Simple XOR encryption with SHA256 of a hardcoded key
-    // This is not cryptographically secure but better than plaintext
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hasher.update(b"vpn9-client-salt-2024");
-    let key_hash = hasher.finalize();
-
-    let encrypted: Vec<u8> = data
-        .bytes()
-        .zip(key_hash.iter().cycle())
-        .map(|(d, k)| d ^ k)
-        .collect();
-
-    general_purpose::STANDARD.encode(encrypted)
-}
-
-fn simple_decrypt(encrypted: &str, key: &str) -> Result<String, String> {
-    let data = general_purpose::STANDARD
-        .decode(encrypted)
-        .map_err(|e| format!("Failed to decode encrypted data: {}", e))?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hasher.update(b"vpn9-client-salt-2024");
-    let key_hash = hasher.finalize();
-
-    let decrypted: Vec<u8> = data
-        .iter()
-        .zip(key_hash.iter().cycle())
-        .map(|(d, k)| d ^ k)
-        .collect();
-
-    String::from_utf8(decrypted).map_err(|e| format!("Failed to decrypt data: {}", e))
 }
 
 fn get_keyring_entry(key: &str) -> Result<Entry, String> {
@@ -257,60 +340,24 @@ async fn store_tokens_to_keyring(access_token: &str, refresh_token: &str) -> Res
     Ok(())
 }
 
-async fn store_tokens_to_file(access_token: &str, refresh_token: &str) -> Result<(), String> {
-    let file_path = get_token_file_path()?;
-
-    // Get a machine-specific key for encryption
-    let machine_id = get_os_machine_id()
-        .await
-        .unwrap_or_else(|_| "fallback-key".to_string());
-
-    let storage = TokenStorage {
-        access_token: simple_encrypt(access_token, &machine_id),
-        refresh_token: simple_encrypt(refresh_token, &machine_id),
-        encrypted: true,
-    };
-
-    let json = serde_json::to_string(&storage)
-        .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
-
-    tokio::fs::write(&file_path, json)
-        .await
-        .map_err(|e| format!("Failed to write token file: {}", e))?;
-
-    // Set restrictive permissions on Unix systems
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&file_path)
-            .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600); // Read/write for owner only
-        std::fs::set_permissions(&file_path, permissions)
-            .map_err(|e| format!("Failed to set file permissions: {}", e))?;
-    }
-
-    Ok(())
-}
-
 async fn store_tokens(access_token: &str, refresh_token: &str) -> Result<(), String> {
-    // Try keyring first
     match store_tokens_to_keyring(access_token, refresh_token).await {
         Ok(_) => {
-            debug!("Tokens stored in keyring");
+            debug!("event=tokens.store backend=keyring");
             Ok(())
         }
-        Err(keyring_err) => {
-            // Fallback to file storage
-            debug!("Keyring failed: {}, using file storage", keyring_err);
-            store_tokens_to_file(access_token, refresh_token)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Both keyring and file storage failed. Keyring: {}, File: {}",
-                        keyring_err, e
-                    )
-                })
+        Err(e) => {
+            #[cfg(feature = "file-fallback-aead")]
+            {
+                warn!("event=tokens.store keyring_failed using=aead_file err={}", e);
+                aead_fallback::store_tokens_to_file_aead(access_token, refresh_token).await?;
+                debug!("event=tokens.store backend=aead_file");
+                Ok(())
+            }
+            #[cfg(not(feature = "file-fallback-aead"))]
+            {
+                Err(format!("Keyring storage failed: {}", e))
+            }
         }
     }
 }
@@ -329,45 +376,26 @@ async fn get_tokens_from_keyring() -> Result<(String, String), String> {
     Ok((access_token, refresh_token))
 }
 
-async fn get_tokens_from_file() -> Result<(String, String), String> {
-    let file_path = get_token_file_path()?;
-
-    let json = tokio::fs::read_to_string(&file_path)
-        .await
-        .map_err(|e| format!("Failed to read token file: {}", e))?;
-
-    let storage: TokenStorage =
-        serde_json::from_str(&json).map_err(|e| format!("Failed to parse token file: {}", e))?;
-
-    if storage.encrypted {
-        let machine_id = get_os_machine_id()
-            .await
-            .unwrap_or_else(|_| "fallback-key".to_string());
-
-        let access_token = simple_decrypt(&storage.access_token, &machine_id)?;
-        let refresh_token = simple_decrypt(&storage.refresh_token, &machine_id)?;
-        Ok((access_token, refresh_token))
-    } else {
-        Ok((storage.access_token, storage.refresh_token))
-    }
-}
-
 async fn get_stored_tokens() -> Result<(String, String), String> {
-    // Try keyring first
     match get_tokens_from_keyring().await {
         Ok(tokens) => Ok(tokens),
-        Err(_) => {
-            // Fallback to file storage
-            get_tokens_from_file().await
+        Err(e) => {
+            #[cfg(feature = "file-fallback-aead")]
+            {
+                debug!("event=tokens.read keyring_failed trying=aead_file err={}", e);
+                aead_fallback::get_tokens_from_file_aead().await
+            }
+            #[cfg(not(feature = "file-fallback-aead"))]
+            {
+                Err(e)
+            }
         }
     }
 }
 
-async fn clear_stored_tokens() -> Result<(), String> {
-    // Try to clear from both storage mechanisms
-    let mut errors = Vec::new();
 
-    // Clear keyring
+async fn clear_stored_tokens() -> Result<(), String> {
+    // Clear from keyring (ignore missing entries)
     if let Ok(access_entry) = get_keyring_entry("access_token") {
         let _ = access_entry.delete_password();
     }
@@ -375,20 +403,16 @@ async fn clear_stored_tokens() -> Result<(), String> {
         let _ = refresh_entry.delete_password();
     }
 
-    // Clear file
+    // Remove legacy token file if present
     if let Ok(file_path) = get_token_file_path() {
         if let Err(e) = tokio::fs::remove_file(&file_path).await {
             if e.kind() != std::io::ErrorKind::NotFound {
-                errors.push(format!("Failed to remove token file: {}", e));
+                return Err(format!("Failed to remove token file: {}", e));
             }
         }
     }
 
-    if !errors.is_empty() {
-        Err(errors.join(", "))
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 // Event payload structures

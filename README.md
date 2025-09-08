@@ -40,7 +40,7 @@ The application features a modern, responsive UI built with [Leptos](https://lep
 ### Security Features
 - 🛡️ **Kill Switch** - Blocks internet if VPN disconnects (coming soon)
 - 🔀 **Split Tunneling** - Route specific apps through VPN (coming soon)
-- 🔒 **Secure Token Storage** - Uses OS keyring with encrypted file fallback
+- 🔒 **Secure Token Storage** - Uses OS keyring only (with AEAD-encrypted file fallback)
 - 🆔 **Device Fingerprinting** - Hybrid device identification for account security
 
 ### Privacy Features
@@ -144,7 +144,7 @@ The application uses a modern architecture with clear separation of concerns:
 #### Authentication System
 - Passphrase-based login with device fingerprinting
 - JWT tokens for session management
-- Secure storage using OS keyring (with encrypted file fallback)
+- Secure storage using OS keyring only (with optional AEAD-encrypted file fallback)
 - Automatic token refresh
 
 #### VPN Connection Manager
@@ -154,7 +154,7 @@ The application uses a modern architecture with clear separation of concerns:
 
 #### Security Features
 - Hybrid device identification (OS ID → UUID → Hardware fingerprint)
-- Encrypted token storage with machine-specific keys
+- OS keyring token storage (optional AEAD-encrypted file fallback)
 - Secure API communication with VPN9 backend
 
 ### Development Commands
@@ -178,6 +178,15 @@ cargo clippy
 # Format code
 cargo fmt
 ```
+
+
+### Logging
+
+- Backend uses `tauri-plugin-log` and emits one-line JSON logs.
+- Fields: `ts`, `level`, `target`, `module_path`, `file`, `line`, `msg`.
+- Level: DEBUG in dev (`cargo tauri dev`), INFO in release (`cargo tauri build`).
+- View logs in the terminal running the app; packaged apps forward to OS logs depending on platform.
+- To change level or destinations, adjust the builder in `src-tauri/src/lib.rs`.
 
 ### API Endpoints
 
@@ -214,11 +223,11 @@ Mobile support is coming soon. The app is designed with mobile in mind, featurin
 
 ### Token Storage
 
-The application uses a multi-layered approach for secure token storage:
+By default, the application stores tokens exclusively in the OS keyring:
 
-1. **Primary**: OS Keyring (Windows Credential Manager, macOS Keychain, Linux Secret Service)
-2. **Fallback**: Encrypted file storage with machine-specific keys
-3. **Encryption**: XOR cipher with SHA256-hashed machine ID
+1. **OS Keyring**: Windows Credential Manager, macOS Keychain, or Linux Secret Service
+2. **No File Fallback**: If the keyring is unavailable, token persistence fails safely
+3. **Migration**: On logout, the app cleans up any legacy token file from older versions
 
 ### Device Identification
 
