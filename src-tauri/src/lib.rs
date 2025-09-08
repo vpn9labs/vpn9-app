@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ fn short_hash(input: &str) -> String {
     hasher.update(input.as_bytes());
     let out = hasher.finalize();
     // first 8 hex chars is enough for correlation without leaking the value
-    format!("{:x}", out)[..8].to_string()
+    format!("{out:x}")[..8].to_string()
 }
 
 // --- Optional AEAD-encrypted file fallback (feature: file-fallback-aead) ---
@@ -189,18 +188,18 @@ struct TokenClaims {
 async fn get_device_id(app: tauri::AppHandle) -> Result<String, String> {
     // Try OS machine ID first (most reliable)
     if let Ok(machine_id) = get_os_machine_id().await {
-        return Ok(format!("os-{}", machine_id));
+        return Ok(format!("os-{machine_id}"));
     }
 
     // Fallback to persistent UUID
     if let Ok(stored_id) = get_or_create_stored_device_id(app).await {
-        return Ok(format!("uuid-{}", stored_id));
+        return Ok(format!("uuid-{stored_id}"));
     }
 
     // Last resort: hardware fingerprint
     get_hardware_fingerprint()
         .await
-        .map(|fp| format!("hw-{}", fp))
+        .map(|fp| format!("hw-{fp}"))
 }
 
 async fn get_os_machine_id() -> Result<String, String> {
@@ -247,7 +246,7 @@ async fn get_os_machine_id() -> Result<String, String> {
             Ok(content) => Ok(content.trim().to_string()),
             Err(_) => match tokio::fs::read_to_string("/var/lib/dbus/machine-id").await {
                 Ok(content) => Ok(content.trim().to_string()),
-                Err(e) => Err(format!("Failed to read machine-id: {}", e)),
+                Err(e) => Err(format!("Failed to read machine-id: {e}")),
             },
         }
     }
@@ -282,7 +281,7 @@ async fn get_or_create_stored_device_id(_app: tauri::AppHandle) -> Result<String
     // Save the new ID to keyring
     device_entry
         .set_password(&new_id)
-        .map_err(|e| format!("Failed to save device ID: {}", e))?;
+        .map_err(|e| format!("Failed to save device ID: {e}"))?;
 
     Ok(new_id)
 }
@@ -293,7 +292,7 @@ async fn get_hardware_fingerprint() -> Result<String, String> {
     let mut system = System::new_all();
     system.refresh_all();
 
-    let components = vec![
+    let components = [
         System::host_name().unwrap_or_default(),
         System::kernel_version().unwrap_or_default(),
         System::os_version().unwrap_or_default(),
@@ -311,7 +310,7 @@ async fn get_hardware_fingerprint() -> Result<String, String> {
     hasher.update(combined.as_bytes());
     let hash = hasher.finalize();
 
-    Ok(format!("{:x}", hash)[..16].to_string())
+    Ok(format!("{hash:x}")[..16].to_string())
 }
 
 // Token storage (keyring only)
@@ -323,13 +322,13 @@ fn get_token_file_path() -> Result<PathBuf, String> {
 
     // Create directory if it doesn't exist
     std::fs::create_dir_all(&app_dir)
-        .map_err(|e| format!("Failed to create config directory: {}", e))?;
+        .map_err(|e| format!("Failed to create config directory: {e}"))?;
 
     Ok(app_dir.join(".tokens"))
 }
 
 fn get_keyring_entry(key: &str) -> Result<Entry, String> {
-    Entry::new("vpn9-client", key).map_err(|e| format!("Failed to create keyring entry: {}", e))
+    Entry::new("vpn9-client", key).map_err(|e| format!("Failed to create keyring entry: {e}"))
 }
 
 async fn store_tokens_to_keyring(access_token: &str, refresh_token: &str) -> Result<(), String> {
@@ -338,10 +337,10 @@ async fn store_tokens_to_keyring(access_token: &str, refresh_token: &str) -> Res
 
     access_entry
         .set_password(access_token)
-        .map_err(|e| format!("Failed to store access token: {}", e))?;
+        .map_err(|e| format!("Failed to store access token: {e}"))?;
     refresh_entry
         .set_password(refresh_token)
-        .map_err(|e| format!("Failed to store refresh token: {}", e))?;
+        .map_err(|e| format!("Failed to store refresh token: {e}"))?;
 
     Ok(())
 }
@@ -365,7 +364,7 @@ async fn store_tokens(access_token: &str, refresh_token: &str) -> Result<(), Str
             }
             #[cfg(not(feature = "file-fallback-aead"))]
             {
-                Err(format!("Keyring storage failed: {}", e))
+                Err(format!("Keyring storage failed: {e}"))
             }
         }
     }
@@ -377,10 +376,10 @@ async fn get_tokens_from_keyring() -> Result<(String, String), String> {
 
     let access_token = access_entry
         .get_password()
-        .map_err(|e| format!("Failed to get access token: {}", e))?;
+        .map_err(|e| format!("Failed to get access token: {e}"))?;
     let refresh_token = refresh_entry
         .get_password()
-        .map_err(|e| format!("Failed to get refresh token: {}", e))?;
+        .map_err(|e| format!("Failed to get refresh token: {e}"))?;
 
     Ok((access_token, refresh_token))
 }
@@ -462,7 +461,7 @@ where
                 } else if e.is_timeout() {
                     "Connection to VPN9 servers timed out. Please try again.".to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 };
                 return Err(msg);
             }
@@ -478,9 +477,9 @@ fn parse_jwt_claims(token: &str) -> Result<TokenClaims, String> {
     let payload_b64 = parts[1];
     let payload = URL_SAFE_NO_PAD
         .decode(payload_b64)
-        .map_err(|e| format!("Failed to base64url-decode JWT payload: {}", e))?;
+        .map_err(|e| format!("Failed to base64url-decode JWT payload: {e}"))?;
     serde_json::from_slice::<TokenClaims>(&payload)
-        .map_err(|e| format!("Failed to parse JWT claims: {}", e))
+        .map_err(|e| format!("Failed to parse JWT claims: {e}"))
 }
 
 fn is_jwt_expired(token: &str, skew_seconds: i64) -> Result<bool, String> {
@@ -493,7 +492,7 @@ fn is_jwt_expired(token: &str, skew_seconds: i64) -> Result<bool, String> {
 async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, String> {
     let (access_token, _refresh_token) = get_stored_tokens()
         .await
-        .map_err(|e| format!("Not authenticated: {}", e))?;
+        .map_err(|e| format!("Not authenticated: {e}"))?;
 
     // Proactive refresh if token appears expired (with small skew)
     if let Ok(true) = is_jwt_expired(&access_token, 30) {
@@ -503,18 +502,18 @@ async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, Str
     // Load (possibly refreshed) token
     let (access_token, _) = get_stored_tokens()
         .await
-        .map_err(|e| format!("Not authenticated: {}", e))?;
+        .map_err(|e| format!("Not authenticated: {e}"))?;
 
     let client = reqwest::Client::builder()
         .timeout(default_timeout())
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
     let resp = request_with_retry(
         || {
             client
                 .get(url)
-                .header("Authorization", format!("Bearer {}", access_token))
+                .header("Authorization", format!("Bearer {access_token}"))
                 .timeout(default_timeout())
         },
         3,
@@ -532,7 +531,7 @@ async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, Str
         || {
             client
                 .get(url)
-                .header("Authorization", format!("Bearer {}", new_access))
+                .header("Authorization", format!("Bearer {new_access}"))
                 .timeout(default_timeout())
         },
         3,
@@ -561,7 +560,7 @@ async fn clear_stored_tokens() -> Result<(), String> {
     if let Ok(file_path) = get_token_file_path() {
         if let Err(e) = tokio::fs::remove_file(&file_path).await {
             if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("Failed to remove token file: {}", e));
+                return Err(format!("Failed to remove token file: {e}"));
             }
         }
     }
@@ -580,6 +579,17 @@ struct LoginSuccessPayload {
 #[derive(Clone, Serialize)]
 struct LoginErrorPayload {
     error: String,
+}
+
+#[derive(Serialize)]
+struct ActionResponse {
+    message: String,
+}
+
+#[derive(Serialize)]
+struct AuthStatus {
+    authenticated: bool,
+    token_present: bool,
 }
 
 // Authentication functions
@@ -608,7 +618,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
             let _ = app.emit(
                 "login-error",
                 LoginErrorPayload {
-                    error: format!("Failed to get device ID: {}", e),
+                    error: format!("Failed to get device ID: {e}"),
                 },
             );
             return;
@@ -639,7 +649,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
             let _ = app.emit(
                 "login-error",
                 LoginErrorPayload {
-                    error: format!("Failed to build HTTP client: {}", e),
+                    error: format!("Failed to build HTTP client: {e}"),
                 },
             );
             return;
@@ -686,10 +696,10 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
                     {
                         message.to_string()
                     } else {
-                        format!("Authentication failed: {}", error_text)
+                        format!("Authentication failed: {error_text}")
                     }
                 } else {
-                    format!("Authentication failed: {}", error_text)
+                    format!("Authentication failed: {error_text}")
                 }
             }
         };
@@ -712,7 +722,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
             let _ = app.emit(
                 "login-error",
                 LoginErrorPayload {
-                    error: format!("Failed to read response: {}", e),
+                    error: format!("Failed to read response: {e}"),
                 },
             );
             return;
@@ -730,7 +740,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
             let _ = app.emit(
                 "login-error",
                 LoginErrorPayload {
-                    error: format!("Failed to parse authentication response: {}", e),
+                    error: format!("Failed to parse authentication response: {e}"),
                 },
             );
             return;
@@ -742,7 +752,7 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
         let _ = app.emit(
             "login-error",
             LoginErrorPayload {
-                error: format!("Failed to store authentication tokens: {}", e),
+                error: format!("Failed to store authentication tokens: {e}"),
             },
         );
         return;
@@ -768,32 +778,31 @@ async fn refresh_token() -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(default_timeout())
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
     let response = request_with_retry(
         || {
             client
                 .post("https://vpn9.com/api/v1/auth/refresh") // Replace with actual API URL
-                .header("Authorization", format!("Bearer {}", refresh_token))
+                .header("Authorization", format!("Bearer {refresh_token}"))
                 .timeout(default_timeout())
         },
         3,
     )
     .await
-    .map_err(|e| format!("Token refresh request failed: {}", e))?;
+    .map_err(|e| format!("Token refresh request failed: {e}"))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
         clear_stored_tokens().await?;
         return Err(format!(
-            "Token refresh failed: {}. Please login again.",
-            error_text
+            "Token refresh failed: {error_text}. Please login again."
         ));
     }
 
     let auth_response: AuthResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
+        .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
 
     // Store new tokens
     store_tokens(&auth_response.access_token, &auth_response.refresh_token).await?;
@@ -802,38 +811,28 @@ async fn refresh_token() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn logout() -> Result<String, String> {
+async fn logout() -> Result<ActionResponse, String> {
     clear_stored_tokens().await?;
-    Ok("Logged out successfully".to_string())
+    Ok(ActionResponse {
+        message: "Logged out successfully".to_string(),
+    })
 }
 
 #[tauri::command]
-async fn get_auth_status() -> Result<HashMap<String, String>, String> {
-    let mut status = HashMap::new();
-
-    match get_stored_tokens().await {
-        Ok((access_token, _refresh_token)) => {
-            // Decode JWT and check exp
-            let expired = match is_jwt_expired(&access_token, 0) {
-                Ok(v) => v,
-                Err(_) => true,
-            };
-            status.insert(
-                "authenticated".to_string(),
-                if expired {
-                    "false".to_string()
-                } else {
-                    "true".to_string()
-                },
-            );
-            status.insert("token_present".to_string(), "true".to_string());
+async fn get_auth_status() -> Result<AuthStatus, String> {
+    let status = match get_stored_tokens().await {
+        Ok((access_token, _)) => {
+            let expired = is_jwt_expired(&access_token, 0).unwrap_or(true);
+            AuthStatus {
+                authenticated: !expired,
+                token_present: true,
+            }
         }
-        Err(_) => {
-            status.insert("authenticated".to_string(), "false".to_string());
-            status.insert("token_present".to_string(), "false".to_string());
-        }
-    }
-
+        Err(_) => AuthStatus {
+            authenticated: false,
+            token_present: false,
+        },
+    };
     Ok(status)
 }
 
@@ -844,21 +843,21 @@ fn get_device_name() -> String {
     let hostname = System::host_name().unwrap_or_default();
 
     if hostname.is_empty() {
-        format!("Desktop {}", os_name)
+        format!("Desktop {os_name}")
     } else {
-        format!("{} ({})", hostname, os_name)
+        format!("{hostname} ({os_name})")
     }
 }
 
 // VPN connection commands
 #[tauri::command]
-async fn vpn_connect(server_id: String, _app: tauri::AppHandle) -> Result<String, String> {
-    info!("event=vpn.connect.start server_id={}", server_id);
+async fn vpn_connect(server_id: String, _app: tauri::AppHandle) -> Result<ActionResponse, String> {
+    info!("event=vpn.connect.start server_id={server_id}");
 
     // Get stored access token
     let (_access_token, _) = get_stored_tokens()
         .await
-        .map_err(|e| format!("Not authenticated: {}", e))?;
+        .map_err(|e| format!("Not authenticated: {e}"))?;
 
     // TODO: Implement actual VPN connection logic
     // This would typically involve:
@@ -868,11 +867,13 @@ async fn vpn_connect(server_id: String, _app: tauri::AppHandle) -> Result<String
     // 4. Monitoring connection status
 
     // For now, just return success
-    Ok(format!("Connected to server: {}", server_id))
+    Ok(ActionResponse {
+        message: format!("Connected to server: {server_id}"),
+    })
 }
 
 #[tauri::command]
-async fn vpn_disconnect() -> Result<String, String> {
+async fn vpn_disconnect() -> Result<ActionResponse, String> {
     info!("event=vpn.disconnect.start");
 
     // TODO: Implement actual VPN disconnection logic
@@ -881,7 +882,9 @@ async fn vpn_disconnect() -> Result<String, String> {
     // 2. Cleaning up configuration
     // 3. Updating connection status
 
-    Ok("Disconnected from VPN".to_string())
+    Ok(ActionResponse {
+        message: "Disconnected from VPN".to_string(),
+    })
 }
 
 #[tauri::command]
@@ -894,17 +897,14 @@ async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Failed to fetch servers ({}): {}",
-            status, error_text
-        ));
+        return Err(format!("Failed to fetch servers ({status}): {error_text}"));
     }
 
     // Get the response text without logging sensitive contents
     let response_text = match response.text().await {
         Ok(text) => text,
         Err(e) => {
-            return Err(format!("Failed to read response: {}", e));
+            return Err(format!("Failed to read response: {e}"));
         }
     };
     // Log only metadata, not the payload
@@ -917,7 +917,7 @@ async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
     let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
         Ok(data) => data,
         Err(e) => {
-            return Err(format!("Failed to parse server response: {}", e));
+            return Err(format!("Failed to parse server response: {e}"));
         }
     };
 
@@ -1042,13 +1042,13 @@ async fn get_vpn_status() -> Result<serde_json::Value, String> {
 // Legacy commands
 #[tauri::command]
 fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+    format!("Hello, {name}! You've been greeted from Rust!")
 }
 
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(url, None::<String>)
-        .map_err(|e| format!("Failed to open URL: {}", e))
+        .map_err(|e| format!("Failed to open URL: {e}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1074,7 +1074,7 @@ pub fn run() {
                 "line": record.line(),
                 "msg": message.to_string(),
             });
-            out.finish(format_args!("{}", obj.to_string()))
+            out.finish(format_args!("{obj}"))
         })
         .build();
 

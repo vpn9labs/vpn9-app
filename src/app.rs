@@ -1,6 +1,6 @@
 use leptos::task::spawn_local;
 use leptos::{ev::SubmitEvent, prelude::*};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::{closure::Closure, JsCast};
 
@@ -24,24 +24,21 @@ struct LoginErrorPayload {
     error: String,
 }
 
-// Helper function to handle Tauri command responses
-async fn invoke_tauri_command(cmd: &str, args: JsValue) -> Result<String, String> {
-    // In Tauri v2, invoke returns a Promise as JsValue
-    let promise = invoke(cmd, args).await;
-
-    // The promise is already resolved at this point
-    // Check if it's a string result
-    if let Some(str_result) = promise.as_string() {
-        Ok(str_result)
-    } else {
-        // Try to convert to string
-        Ok(js_sys::JSON::stringify(&promise)
-            .map(|s| {
-                s.as_string()
-                    .unwrap_or_else(|| "Unknown response".to_string())
-            })
-            .unwrap_or_else(|_| "Failed to stringify response".to_string()))
-    }
+// Typed invoke helper (no unwraps)
+async fn invoke_typed<T, A>(cmd: &str, args: &A) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+    A: ?Sized + Serialize,
+{
+    let args_js =
+        serde_wasm_bindgen::to_value(args).map_err(|e| format!("Failed to serialize args: {e}"))?;
+    let value = invoke(cmd, args_js).await;
+    serde_wasm_bindgen::from_value::<T>(value.clone()).map_err(|e| {
+        let fallback = value
+            .as_string()
+            .unwrap_or_else(|| "Unknown response".to_string());
+        format!("Failed to decode response: {e}; data={fallback}")
+    })
 }
 
 // LoginArgs struct removed - now handled by backend
@@ -66,6 +63,18 @@ struct VpnServer {
     load: f32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ActionResponse {
+    message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AuthStatus {
+    authenticated: bool,
+    #[serde(rename = "token_present")]
+    _token_present: bool,
+}
+
 #[component]
 fn VpnConnectionPanel() -> impl IntoView {
     let (connection_state, set_connection_state) = signal(VpnConnectionState::Disconnected);
@@ -75,44 +84,33 @@ fn VpnConnectionPanel() -> impl IntoView {
 
     // Load available servers on mount
     spawn_local(async move {
-        let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
-        match invoke_tauri_command("get_vpn_servers", args).await {
-            Ok(response) => {
-                if let Ok(server_list) = serde_json::from_str::<Vec<VpnServer>>(&response) {
-                    if let Some(first_server) = server_list.first() {
-                        set_selected_server.set(Some(first_server.clone()));
-                    }
-                    set_servers.set(server_list);
-                } else {
-                    set_connection_info.set("Failed to load servers".to_string());
+        match invoke_typed::<Vec<VpnServer>, _>("get_vpn_servers", &serde_json::json!({})).await {
+            Ok(server_list) => {
+                if let Some(first_server) = server_list.first() {
+                    set_selected_server.set(Some(first_server.clone()));
                 }
+                set_servers.set(server_list);
             }
-            Err(e) => {
-                set_connection_info.set(format!("Error loading servers: {e}"));
-            }
+            Err(e) => set_connection_info.set(format!("Error loading servers: {e}")),
         }
     });
 
     let handle_connect = move |_| {
-        let server = selected_server.get_untracked();
-        if server.is_none() {
-            set_connection_info.set("Please select a server first".to_string());
-            return;
-        }
-
-        let server = server.unwrap();
+        let server = match selected_server.get_untracked() {
+            Some(s) => s,
+            None => {
+                set_connection_info.set("Please select a server first".to_string());
+                return;
+            }
+        };
         set_connection_state.set(VpnConnectionState::Connecting);
         set_connection_info.set(format!("Connecting to {}...", server.name));
 
         spawn_local(async move {
             // Call Tauri command to connect
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
-                "serverId": server.id
-            }))
-            .unwrap();
-
-            match invoke_tauri_command("vpn_connect", args).await {
-                Ok(_) => {
+            let args = serde_json::json!({ "serverId": server.id });
+            match invoke_typed::<ActionResponse, _>("vpn_connect", &args).await {
+                Ok(_resp) => {
                     set_connection_state.set(VpnConnectionState::Connected);
                     set_connection_info.set(format!("Connected to {}", server.name));
                 }
@@ -130,10 +128,9 @@ fn VpnConnectionPanel() -> impl IntoView {
 
         spawn_local(async move {
             // Call Tauri command to disconnect
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
-
-            match invoke_tauri_command("vpn_disconnect", args).await {
-                Ok(_) => {
+            match invoke_typed::<ActionResponse, _>("vpn_disconnect", &serde_json::json!({})).await
+            {
+                Ok(_resp) => {
                     set_connection_state.set(VpnConnectionState::Disconnected);
                     set_connection_info.set("Disconnected".to_string());
                 }
@@ -234,22 +231,9 @@ pub fn App() -> impl IntoView {
 
     // Load auth status on component mount
     spawn_local(async move {
-        // Check authentication status
-        let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
-        match invoke_tauri_command("get_auth_status", args).await {
-            Ok(auth_status) => {
-                if let Ok(status) = serde_json::from_str::<serde_json::Value>(&auth_status) {
-                    if let Some(authenticated) =
-                        status.get("authenticated").and_then(|v| v.as_str())
-                    {
-                        set_is_authenticated.set(authenticated == "true");
-                    }
-                }
-            }
-            Err(_) => {
-                // Failed to get auth status, assume not authenticated
-                set_is_authenticated.set(false);
-            }
+        match invoke_typed::<AuthStatus, _>("get_auth_status", &serde_json::json!({})).await {
+            Ok(status) => set_is_authenticated.set(status.authenticated),
+            Err(_) => set_is_authenticated.set(false),
         }
     });
 
@@ -324,13 +308,18 @@ pub fn App() -> impl IntoView {
             let _success_handler = success_handler;
 
             // Call the login command
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+            let login_args = match serde_wasm_bindgen::to_value(&serde_json::json!({
                 "passphrase": passphrase_value
-            }))
-            .unwrap();
+            })) {
+                Ok(v) => v,
+                Err(e) => {
+                    set_login_status.set(format!("Failed to serialize login args: {e}"));
+                    return;
+                }
+            };
 
-            // The login command no longer returns a value, it emits events
-            let _ = invoke("login", args).await;
+            // The login command emits events; ignore return value
+            let _ = invoke("login", login_args).await;
         });
     };
 
@@ -338,10 +327,9 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             set_login_status.set("Logging out...".to_string());
 
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({})).unwrap();
-            match invoke_tauri_command("logout", args).await {
-                Ok(response) => {
-                    set_login_status.set(response);
+            match invoke_typed::<ActionResponse, _>("logout", &serde_json::json!({})).await {
+                Ok(resp) => {
+                    set_login_status.set(resp.message);
                     set_is_authenticated.set(false);
                     set_passphrase.set(String::new());
                 }
@@ -356,11 +344,11 @@ pub fn App() -> impl IntoView {
         // Open signup page in external browser using custom Tauri command
         spawn_local(async move {
             let url = "https://vpn9.com/signup";
-            let args = serde_wasm_bindgen::to_value(&serde_json::json!({
-                "url": url
-            }))
-            .unwrap();
-            let _ = invoke_tauri_command("open_url", args).await;
+            let args_js = match serde_wasm_bindgen::to_value(&serde_json::json!({ "url": url })) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let _ = invoke("open_url", args_js).await;
         });
     };
 
