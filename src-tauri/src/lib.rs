@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use keyring::Entry;
 use log::{debug, info, warn};
+use reqwest::header::RETRY_AFTER;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Emitter;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 // --- Logging helpers (sanitize + structure) ---
@@ -402,6 +405,71 @@ async fn get_stored_tokens() -> Result<(String, String), String> {
     }
 }
 
+fn default_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+async fn request_with_retry<F>(
+    mut build: F,
+    max_retries: usize,
+) -> Result<reqwest::Response, String>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    let mut attempt: usize = 0;
+    let mut backoff_ms: u64 = 200;
+
+    loop {
+        attempt += 1;
+        let req = build();
+        let result = req.send().await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                // Retry on 408, 429, and 5xx
+                let should_retry_status = status.as_u16() == 408
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error();
+                if should_retry_status && attempt < max_retries {
+                    // Honor Retry-After header if present (seconds)
+                    let mut wait = backoff_ms;
+                    if let Some(hv) = resp.headers().get(RETRY_AFTER) {
+                        if let Ok(s) = hv.to_str() {
+                            if let Ok(secs) = s.parse::<u64>() {
+                                wait = secs.saturating_mul(1000);
+                            }
+                        }
+                    }
+                    sleep(Duration::from_millis(wait)).await;
+                    backoff_ms = (backoff_ms * 2).min(1500);
+                    continue;
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                if attempt < max_retries && (e.is_connect() || e.is_timeout()) {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(1500);
+                    continue;
+                }
+                let msg = if e.is_connect() {
+                    "Cannot connect to VPN9 servers. Please check your internet connection."
+                        .to_string()
+                } else if e.is_timeout() {
+                    "Connection to VPN9 servers timed out. Please try again.".to_string()
+                } else {
+                    format!("Network error: {}", e)
+                };
+                return Err(msg);
+            }
+        }
+    }
+}
+
 fn parse_jwt_claims(token: &str) -> Result<TokenClaims, String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -437,13 +505,21 @@ async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, Str
         .await
         .map_err(|e| format!("Not authenticated: {}", e))?;
 
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {}", e))?;
+    let client = reqwest::Client::builder()
+        .timeout(default_timeout())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let resp = request_with_retry(
+        || {
+            client
+                .get(url)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await?;
 
     if resp.status().as_u16() != 401 {
         return Ok(resp);
@@ -452,12 +528,16 @@ async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response, Str
     // 401 -> try refresh once, then retry
     let _ = refresh_token().await?;
     let (new_access, _) = get_stored_tokens().await?;
-    let retry = client
-        .get(url)
-        .header("Authorization", format!("Bearer {}", new_access))
-        .send()
-        .await
-        .map_err(|e| format!("Network error after refresh: {}", e))?;
+    let retry = request_with_retry(
+        || {
+            client
+                .get(url)
+                .header("Authorization", format!("Bearer {}", new_access))
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await?;
 
     if retry.status().as_u16() == 401 {
         // Clear tokens to force re-login path
@@ -549,25 +629,37 @@ async fn login(passphrase: String, app: tauri::AppHandle) {
         device_id,
     };
 
-    // Make API call to Rails backend
-    let client = reqwest::Client::new();
-    let response = match client
-        .post("https://vpn9.com/api/v1/auth/token") // Replace with actual API URL
-        .header("Content-Type", "application/json")
-        .json(&auth_request)
-        .send()
-        .await
+    // Make API call to Rails backend (with timeout + minimal retry)
+    let client = match reqwest::Client::builder()
+        .timeout(default_timeout())
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.emit(
+                "login-error",
+                LoginErrorPayload {
+                    error: format!("Failed to build HTTP client: {}", e),
+                },
+            );
+            return;
+        }
+    };
+    let response = match request_with_retry(
+        || {
+            client
+                .post("https://vpn9.com/api/v1/auth/token") // Replace with actual API URL
+                .header("Content-Type", "application/json")
+                .json(&auth_request)
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await
     {
         Ok(resp) => resp,
-        Err(e) => {
-            let error_msg = if e.is_connect() {
-                "Cannot connect to VPN9 servers. Please check your internet connection.".to_string()
-            } else if e.is_timeout() {
-                "Connection to VPN9 servers timed out. Please try again.".to_string()
-            } else {
-                format!("Network error: {}", e)
-            };
-            let _ = app.emit("login-error", LoginErrorPayload { error: error_msg });
+        Err(msg) => {
+            let _ = app.emit("login-error", LoginErrorPayload { error: msg });
             return;
         }
     };
@@ -672,14 +764,22 @@ async fn refresh_token() -> Result<String, String> {
     // Get stored refresh token
     let (_, refresh_token) = get_stored_tokens().await?;
 
-    // Make refresh request
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://vpn9.com/api/v1/auth/refresh") // Replace with actual API URL
-        .header("Authorization", format!("Bearer {}", refresh_token))
-        .send()
-        .await
-        .map_err(|e| format!("Token refresh request failed: {}", e))?;
+    // Make refresh request with timeout + minimal retry
+    let client = reqwest::Client::builder()
+        .timeout(default_timeout())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let response = request_with_retry(
+        || {
+            client
+                .post("https://vpn9.com/api/v1/auth/refresh") // Replace with actual API URL
+                .header("Authorization", format!("Bearer {}", refresh_token))
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await
+    .map_err(|e| format!("Token refresh request failed: {}", e))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();

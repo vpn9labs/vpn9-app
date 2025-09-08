@@ -417,7 +417,7 @@ pub fn App() -> impl IntoView {
                         <form on:submit=handle_login>
                             <div class="input-group">
                                 <input
-                                    type="password"
+                                    type="text"
                                     id="passphrase-input"
                                     class="passphrase-input"
                                     placeholder="xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx"
