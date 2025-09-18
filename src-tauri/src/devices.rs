@@ -9,7 +9,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::auth::{get_os_machine_id, KEYRING_SERVICE};
 use crate::http::authorized_post_json_with_refresh;
-use crate::util::{get_device_name, short_hash};
+use crate::util::short_hash;
 
 const WG_PRIVATE_KEY: &str = "wg_private_key";
 const WG_PUBLIC_KEY: &str = "wg_public_key";
@@ -508,7 +508,6 @@ async fn create_device(public_key: &str) -> Result<CreateDeviceResponse, String>
         "device".to_string(),
         serde_json::json!({
             "public_key": public_key,
-            "name": get_device_name(),
         }),
     );
 

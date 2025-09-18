@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::devices::{clear_wireguard_credentials, ensure_device_registered};
 use crate::http::{default_timeout, request_with_retry};
-use crate::util::{get_device_name, short_hash};
+use crate::util::short_hash;
 
 pub(crate) const KEYRING_SERVICE: &str = "vpn9-client";
 const CLIENT_LABEL: &str = "vpn9-desktop";
@@ -493,12 +493,10 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
             return;
         }
     };
-    let device_name = get_device_name();
     // Do not log secrets. Provide only safe, structured context.
     info!(
-        "event=login.device_info device_id_hash={} device_name_len={}",
-        short_hash(&device_id),
-        device_name.len()
+        "event=login.device_info device_id_hash={}",
+        short_hash(&device_id)
     );
 
     // Prepare authentication request
@@ -705,7 +703,6 @@ pub async fn refresh_token() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn logout() -> Result<crate::auth::ActionResponse, String> {
-    clear_wireguard_credentials().await?;
     clear_stored_tokens().await?;
     Ok(ActionResponse {
         message: "Logged out successfully".to_string(),
