@@ -75,7 +75,7 @@ pub async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response,
         .map_err(|e| format!("Not authenticated: {e}"))?;
 
     // Proactive refresh if token appears expired (with small skew)
-    if let Ok(true) = is_jwt_expired(&access_token, 30) {
+    if let Ok(true) = is_jwt_expired(&access_token, 4 * 3600) {
         let _ = refresh_token().await; // Ignore message; errors handled by retry below
     }
 
@@ -120,6 +120,68 @@ pub async fn authorized_get_with_refresh(url: &str) -> Result<reqwest::Response,
 
     if retry.status().as_u16() == 401 {
         // Clear tokens to force re-login path
+        let _ = clear_stored_tokens().await;
+        return Err("Unauthorized. Please login again.".to_string());
+    }
+
+    Ok(retry)
+}
+
+pub async fn authorized_post_json_with_refresh(
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, String> {
+    let (mut access_token, _refresh_token) = get_stored_tokens()
+        .await
+        .map_err(|e| format!("Not authenticated: {e}"))?;
+
+    if let Ok(true) = is_jwt_expired(&access_token, 4 * 3600) {
+        let _ = refresh_token().await; // best effort; errors handled below
+        if let Ok((refreshed, _)) = get_stored_tokens().await {
+            access_token = refreshed;
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(default_timeout())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let initial = request_with_retry(
+        || {
+            client
+                .post(url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Accept", "application/json")
+                .json(body)
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await?;
+
+    if initial.status().as_u16() != 401 {
+        return Ok(initial);
+    }
+
+    let _ = refresh_token().await?;
+    let (new_access, _) = get_stored_tokens().await?;
+    access_token = new_access;
+
+    let retry = request_with_retry(
+        || {
+            client
+                .post(url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Accept", "application/json")
+                .json(body)
+                .timeout(default_timeout())
+        },
+        3,
+    )
+    .await?;
+
+    if retry.status().as_u16() == 401 {
         let _ = clear_stored_tokens().await;
         return Err("Unauthorized. Please login again.".to_string());
     }

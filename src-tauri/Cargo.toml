@@ -41,18 +41,19 @@ tauri-plugin-log = "2"
 log = "0.4.27"
 dirs = "5.0"
 base64 = "0.21"
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
 winreg = "0.50"
 
 [features]
-default = []
+default = ["file-fallback-aead"]
 # Optional encrypted file fallback for tokens when keyring is unavailable
 file-fallback-aead = [
   "dep:chacha20poly1305",
   "dep:hkdf",
-  "dep:rand",
 ]
 
 [dependencies.chacha20poly1305]
@@ -61,8 +62,4 @@ optional = true
 
 [dependencies.hkdf]
 version = "0.12"
-optional = true
-
-[dependencies.rand]
-version = "0.8"
 optional = true

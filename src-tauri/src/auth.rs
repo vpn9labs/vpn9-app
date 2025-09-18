@@ -2,20 +2,24 @@ use std::path::PathBuf;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use keyring::Entry;
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Emitter;
 use uuid::Uuid;
 
+use crate::devices::{clear_wireguard_credentials, ensure_device_registered};
 use crate::http::{default_timeout, request_with_retry};
 use crate::util::{get_device_name, short_hash};
+
+pub(crate) const KEYRING_SERVICE: &str = "vpn9-client";
+const CLIENT_LABEL: &str = "vpn9-desktop";
 
 // --- Optional AEAD-encrypted file fallback (feature: file-fallback-aead) ---
 #[cfg(feature = "file-fallback-aead")]
 mod aead_fallback {
     use super::*;
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::engine::general_purpose;
     use chacha20poly1305::aead::{Aead, KeyInit};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use hkdf::Hkdf;
@@ -145,17 +149,19 @@ mod aead_fallback {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthRequest {
     passphrase: String,
-    device_name: String,
-    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_label: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthResponse {
-    access_token: String,
+    token: String,
     refresh_token: String,
     expires_in: u64,
-    token_type: String,
-    subscription_status: String,
+    #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    subscription_status: Option<String>,
     subscription_expires_at: String,
 }
 
@@ -178,7 +184,6 @@ pub struct TokenClaims {
 #[derive(Clone, Serialize)]
 pub struct LoginSuccessPayload {
     pub message: String,
-    pub subscription_status: String,
     pub subscription_expires_at: String,
 }
 
@@ -339,7 +344,7 @@ fn get_token_file_path() -> Result<PathBuf, String> {
 }
 
 fn get_keyring_entry(key: &str) -> Result<Entry, String> {
-    Entry::new("vpn9-client", key).map_err(|e| format!("Failed to create keyring entry: {e}"))
+    Entry::new(KEYRING_SERVICE, key).map_err(|e| format!("Failed to create keyring entry: {e}"))
 }
 
 async fn store_tokens_to_keyring(access_token: &str, refresh_token: &str) -> Result<(), String> {
@@ -499,8 +504,7 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
     // Prepare authentication request
     let auth_request = AuthRequest {
         passphrase,
-        device_name,
-        device_id,
+        client_label: Some(CLIENT_LABEL.to_string()),
     };
 
     // Make API call to Rails backend (with timeout + minimal retry)
@@ -612,7 +616,7 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
     };
 
     // Store tokens securely
-    if let Err(e) = store_tokens(&auth_response.access_token, &auth_response.refresh_token).await {
+    if let Err(e) = store_tokens(&auth_response.token, &auth_response.refresh_token).await {
         let _ = app.emit(
             "login-error",
             LoginErrorPayload {
@@ -622,13 +626,35 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
         return;
     }
 
+    let _ = app.emit("login-status", "Registering this device with VPN9...");
+
+    match ensure_device_registered(None).await {
+        Ok(outcome) => {
+            info!(
+                "event=login.device_synced regenerated={} created={}",
+                outcome.keys_regenerated, outcome.newly_created
+            );
+        }
+        Err(e) => {
+            warn!("event=login.device_sync_failed err={}", e);
+            let _ = clear_wireguard_credentials().await;
+            let _ = clear_stored_tokens().await;
+            let _ = app.emit(
+                "login-error",
+                LoginErrorPayload {
+                    error: format!("Failed to initialize device record: {e}"),
+                },
+            );
+            return;
+        }
+    }
+
     // Emit success event
     let _ = app.emit(
         "login-success",
         LoginSuccessPayload {
             message: "Login successful!".to_string(),
-            subscription_status: auth_response.subscription_status,
-            subscription_expires_at: auth_response.subscription_expires_at,
+            subscription_expires_at: auth_response.subscription_expires_at.clone(),
         },
     );
 }
@@ -647,7 +673,10 @@ pub async fn refresh_token() -> Result<String, String> {
         || {
             client
                 .post("https://vpn9.com/api/v1/auth/refresh") // Replace with actual API URL
-                .header("Authorization", format!("Bearer {refresh_token}"))
+                .header("Content-Type", "application/json")
+                .json(&RefreshRequest {
+                    refresh_token: refresh_token.clone(),
+                })
                 .timeout(default_timeout())
         },
         3,
@@ -669,13 +698,14 @@ pub async fn refresh_token() -> Result<String, String> {
         .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
 
     // Store new tokens
-    store_tokens(&auth_response.access_token, &auth_response.refresh_token).await?;
+    store_tokens(&auth_response.token, &auth_response.refresh_token).await?;
 
     Ok("Token refreshed successfully".to_string())
 }
 
 #[tauri::command]
 pub async fn logout() -> Result<crate::auth::ActionResponse, String> {
+    clear_wireguard_credentials().await?;
     clear_stored_tokens().await?;
     Ok(ActionResponse {
         message: "Logged out successfully".to_string(),
@@ -687,8 +717,14 @@ pub async fn get_auth_status() -> Result<crate::auth::AuthStatus, String> {
     let status = match get_stored_tokens().await {
         Ok((access_token, _)) => {
             let expired = is_jwt_expired(&access_token, 0).unwrap_or(true);
+            let authenticated = !expired;
+            if authenticated {
+                if let Err(e) = ensure_device_registered(None).await {
+                    warn!("event=auth.status.device_sync_failed err={}", e);
+                }
+            }
             AuthStatus {
-                authenticated: !expired,
+                authenticated,
                 token_present: true,
             }
         }

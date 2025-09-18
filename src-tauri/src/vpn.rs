@@ -1,6 +1,7 @@
 use log::info;
 
 use crate::auth::{get_stored_tokens, ActionResponse};
+use crate::devices::ensure_device_registered;
 
 // VPN connection commands
 #[tauri::command]
@@ -11,9 +12,15 @@ pub async fn vpn_connect(
     info!("event=vpn.connect.start server_id={server_id}");
 
     // Get stored access token
-    let (_access_token, _) = get_stored_tokens()
+    get_stored_tokens()
         .await
         .map_err(|e| format!("Not authenticated: {e}"))?;
+
+    let device_sync = ensure_device_registered(Some(server_id.clone())).await?;
+    info!(
+        "event=vpn.device.synced regenerated={} created={}",
+        device_sync.keys_regenerated, device_sync.newly_created
+    );
 
     // TODO: Implement actual VPN connection logic
 

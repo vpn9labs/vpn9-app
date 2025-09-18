@@ -62,8 +62,18 @@ pub async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
 
                     if let Some(relays) = city.get("relays").and_then(|r| r.as_array()) {
                         for relay in relays {
+                            let status = relay
+                                .get("status")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("active");
+                            if status != "active" {
+                                continue;
+                            }
+
                             let hostname =
                                 relay.get("hostname").and_then(|h| h.as_str()).unwrap_or("");
+                            let relay_id =
+                                relay.get("id").and_then(|i| i.as_str()).unwrap_or(hostname);
                             let ipv4_addr = relay
                                 .get("ipv4_addr_in")
                                 .and_then(|i| i.as_str())
@@ -79,7 +89,7 @@ pub async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
 
                             // Create a flattened server object for the UI
                             let server = serde_json::json!({
-                                "id": hostname,
+                                "id": relay_id,
                                 "hostname": hostname,
                                 "name": format!("{}, {}", city_name, country_name),
                                 "country": country_name,
@@ -90,6 +100,7 @@ pub async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
                                 "longitude": longitude,
                                 "ipv4_addr_in": ipv4_addr,
                                 "public_key": public_key,
+                                "port": multihop_port,
                                 "multihop_port": multihop_port,
                                 "load": 0.0
                             });

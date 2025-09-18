@@ -58,7 +58,7 @@ enum VpnConnectionState {
 struct VpnServer {
     id: String,
     name: String,
-    country_code: String,
+    country: String,
     city: String,
     load: f32,
 }
@@ -187,7 +187,7 @@ fn VpnConnectionPanel() -> impl IntoView {
                         children=move |server| {
                             view! {
                                 <option value={server.id.clone()}>
-                                    {format!("{} - {}, {} ({:.0}% load)", server.name, server.city, server.country_code, server.load)}
+                                    {format!("{} - {}, {} ({:.0}% load)", server.name, server.city, server.country, server.load)}
                                 </option>
                             }
                         }
