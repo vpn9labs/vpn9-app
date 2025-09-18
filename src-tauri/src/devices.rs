@@ -526,5 +526,35 @@ async fn create_device(public_key: &str) -> Result<CreateDeviceResponse, String>
     }
 
     let body = response.text().await.unwrap_or_default();
+
+    if status.as_u16() == 422 {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(limit) = json.get("device_limit").and_then(|v| v.as_u64()) {
+                let registered = json
+                    .get("devices_registered")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Device limit reached. You have {registered}/{limit} devices registered. Remove one in VPN9 settings and try again."
+                ));
+            }
+
+            if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
+                let combined = errors
+                    .iter()
+                    .filter_map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !combined.is_empty() {
+                    return Err(format!("Device registration failed: {combined}"));
+                }
+            }
+
+            if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
+                return Err(format!("Device registration failed: {error}"));
+            }
+        }
+    }
+
     Err(format!("Device registration failed ({status}): {body}"))
 }
