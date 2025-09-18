@@ -703,6 +703,7 @@ pub async fn refresh_token() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn logout() -> Result<crate::auth::ActionResponse, String> {
+    clear_wireguard_credentials().await?;
     clear_stored_tokens().await?;
     Ok(ActionResponse {
         message: "Logged out successfully".to_string(),
