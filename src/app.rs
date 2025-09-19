@@ -61,6 +61,15 @@ struct VpnServer {
     country: String,
     city: String,
     load: f32,
+    hostname: String,
+    #[serde(default)]
+    public_key: String,
+    #[serde(default = "default_wireguard_port")]
+    port: u16,
+}
+
+fn default_wireguard_port() -> u16 {
+    51820
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,13 +115,19 @@ fn VpnConnectionPanel() -> impl IntoView {
         set_connection_state.set(VpnConnectionState::Connecting);
         set_connection_info.set(format!("Connecting to {}...", server.name));
 
+        let server_clone = server.clone();
         spawn_local(async move {
-            // Call Tauri command to connect
-            let args = serde_json::json!({ "serverId": server.id });
+            let args = serde_json::json!({
+                "serverId": server_clone.id,
+                "serverName": server_clone.name,
+                "hostname": server_clone.hostname,
+                "publicKey": server_clone.public_key,
+                "port": server_clone.port,
+            });
             match invoke_typed::<ActionResponse, _>("vpn_connect", &args).await {
                 Ok(_resp) => {
                     set_connection_state.set(VpnConnectionState::Connected);
-                    set_connection_info.set(format!("Connected to {}", server.name));
+                    set_connection_info.set(format!("Connected to {}", server_clone.name));
                 }
                 Err(e) => {
                     set_connection_state.set(VpnConnectionState::Error(e.clone()));

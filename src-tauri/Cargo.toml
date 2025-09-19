@@ -42,11 +42,14 @@ log = "0.4.27"
 dirs = "5.0"
 base64 = "0.21"
 rand = "0.8"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+defguard_wireguard_rs = "0.7.7"
 
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
 winreg = "0.50"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+boringtun = "0.5.3"
 
 [features]
 default = ["file-fallback-aead"]

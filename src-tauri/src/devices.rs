@@ -1,11 +1,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use keyring::{Entry, Error as KeyringError};
 use log::{debug, info, warn};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use x25519_dalek::{PublicKey, StaticSecret};
+use defguard_wireguard_rs::key::Key;
 
 use crate::auth::{get_os_machine_id, KEYRING_SERVICE};
 use crate::http::authorized_post_json_with_refresh;
@@ -273,35 +272,28 @@ pub async fn clear_wireguard_credentials() -> Result<(), String> {
     clear_wireguard_keys().await
 }
 
+pub async fn get_wireguard_keypair() -> Result<(String, String), String> {
+    match load_wireguard_keys().await? {
+        Some(pair) => Ok(pair),
+        None => Err("WireGuard keys are not available".to_string()),
+    }
+}
+
 fn generate_wireguard_keypair() -> Result<(String, String), String> {
-    let mut private_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut private_bytes);
-    // Clamp per X25519 requirements
-    private_bytes[0] &= 248;
-    private_bytes[31] &= 127;
-    private_bytes[31] |= 64;
+    let private = Key::generate();
+    let public = private.public_key();
 
-    let secret = StaticSecret::from(private_bytes);
-    let public = PublicKey::from(&secret);
-
-    let private_b64 = STANDARD.encode(secret.to_bytes());
-    let public_b64 = STANDARD.encode(public.to_bytes());
+    let private_b64 = STANDARD.encode(private.as_array());
+    let public_b64 = STANDARD.encode(public.as_array());
 
     Ok((private_b64, public_b64))
 }
 
 fn derive_public_from_private(private_b64: &str) -> Result<String, String> {
-    let private_bytes = STANDARD
-        .decode(private_b64)
-        .map_err(|e| format!("Failed to decode WireGuard private key: {e}"))?;
-    if private_bytes.len() != 32 {
-        return Err("Invalid WireGuard private key length".to_string());
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&private_bytes);
-    let secret = StaticSecret::from(bytes);
-    let public = PublicKey::from(&secret);
-    Ok(STANDARD.encode(public.to_bytes()))
+    let private_key = Key::try_from(private_b64)
+        .map_err(|e| format!("Failed to parse WireGuard private key: {e}"))?;
+    let public_key = private_key.public_key();
+    Ok(STANDARD.encode(public_key.as_array()))
 }
 
 async fn load_wireguard_keys() -> Result<Option<(String, String)>, String> {

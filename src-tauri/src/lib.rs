@@ -5,6 +5,7 @@ pub mod misc;
 pub mod relays;
 pub mod util;
 pub mod vpn;
+pub mod wireguard;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

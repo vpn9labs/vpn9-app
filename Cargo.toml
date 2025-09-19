@@ -26,3 +26,6 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 
 [workspace]
 members = ["src-tauri"]
+
+[patch.crates-io]
+boringtun = { path = "src-tauri/vendor/boringtun-0.5.3" }
