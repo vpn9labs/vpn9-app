@@ -150,13 +150,13 @@ mod aead_fallback {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenClaims {
-    pub sub: String, // user_uuid
-    pub iat: u64,    // issued at
-    pub exp: u64,    // expires at
-    pub aud: String, // audience
-    pub device_id: String,
-    pub subscription_valid: bool,
-    pub subscription_expires: u64,
+    pub sub: String,         // user_uuid
+    pub iat: u64,            // issued at
+    pub exp: u64,            // expires at
+    pub aud: Option<String>, // optional audience
+    pub device_id: Option<String>,
+    pub subscription_valid: Option<bool>,
+    pub subscription_expires: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]

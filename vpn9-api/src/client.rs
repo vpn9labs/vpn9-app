@@ -25,7 +25,9 @@ impl Client {
     pub fn new(base_url: impl AsRef<str>) -> Result<Self, ApiError> {
         let mut url = Url::parse(base_url.as_ref())?;
         if !url.path().ends_with('/') {
-            url = url.join("./")?;
+            let mut path = url.path().to_string();
+            path.push('/');
+            url.set_path(&path);
         }
 
         let http = HttpClient::builder()
