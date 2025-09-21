@@ -4,14 +4,13 @@ use keyring::{Entry, Error as KeyringError};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::auth::{
     access_token_with_refresh, clear_stored_tokens, get_os_machine_id, get_stored_tokens,
     refresh_token, API_BASE_URL, KEYRING_SERVICE,
 };
 use crate::util::short_hash;
-use vpn9_api::models::DeviceRecord;
+pub use vpn9_api::models::DeviceRecord;
 use vpn9_api::{ApiError as Vpn9ApiError, Client as Vpn9ApiClient};
 
 const WG_PRIVATE_KEY: &str = "wg_private_key";
@@ -190,33 +189,26 @@ pub struct DeviceSyncOutcome {
     pub newly_created: bool,
 }
 
-async fn execute_authorized<F, Fut, T>(mut operation: F) -> Result<T, DeviceApiError>
-where
-    F: FnMut(&Vpn9ApiClient, &str) -> Fut,
-    Fut: std::future::Future<Output = Result<T, Vpn9ApiError>>,
-{
-    let client =
-        Vpn9ApiClient::new(API_BASE_URL).map_err(|e| DeviceApiError::Api(e.to_string()))?;
-    let mut access_token = access_token_with_refresh(4 * 3600).await?;
+fn api_client() -> Result<Vpn9ApiClient, DeviceApiError> {
+    Vpn9ApiClient::new(API_BASE_URL).map_err(|e| DeviceApiError::Api(e.to_string()))
+}
 
-    match operation(&client, &access_token).await {
-        Ok(value) => Ok(value),
-        Err(Vpn9ApiError::Unauthorized) => {
-            refresh_token().await.map_err(DeviceApiError::Api)?;
-            access_token = get_stored_tokens().await.map_err(DeviceApiError::Api)?.0;
+fn ensure_device_active(device: DeviceRecord) -> Result<DeviceRecord, DeviceApiError> {
+    if device.status != "active" {
+        Err(DeviceApiError::Api(
+            "Device is inactive. Please check your subscription.".to_string(),
+        ))
+    } else {
+        Ok(device)
+    }
+}
 
-            match operation(&client, &access_token).await {
-                Ok(value) => Ok(value),
-                Err(Vpn9ApiError::Unauthorized) => {
-                    clear_stored_tokens().await.map_err(DeviceApiError::Api)?;
-                    Err(DeviceApiError::Api(
-                        "Unauthorized. Please login again.".to_string(),
-                    ))
-                }
-                Err(err) => Err(DeviceApiError::from_api_error(err)),
-            }
+fn map_device_error_to_string(err: DeviceApiError) -> String {
+    match err {
+        DeviceApiError::Api(msg) => msg,
+        DeviceApiError::NotFound => {
+            "Device registration endpoint not found. Please try again later.".to_string()
         }
-        Err(err) => Err(DeviceApiError::from_api_error(err)),
     }
 }
 
@@ -523,37 +515,56 @@ fn delete_secret(key: &str) -> Result<(), String> {
 }
 
 async fn verify_device(public_key: &str) -> Result<DeviceRecord, DeviceApiError> {
-    let public_key_ref = Arc::new(public_key.to_string());
+    let client = api_client()?;
+    let mut access_token = access_token_with_refresh(4 * 3600)
+        .await
+        .map_err(DeviceApiError::Api)?;
 
-    let device = execute_authorized(|client, access_token| {
-        let pk = public_key_ref.clone();
-        async move { client.verify_device(access_token, pk.as_ref()).await }
-    })
-    .await?;
+    match client.verify_device(&access_token, public_key).await {
+        Ok(device) => ensure_device_active(device),
+        Err(Vpn9ApiError::Unauthorized) => {
+            refresh_token().await.map_err(DeviceApiError::Api)?;
+            access_token = get_stored_tokens().await.map_err(DeviceApiError::Api)?.0;
 
-    if device.status != "active" {
-        return Err(DeviceApiError::Api(
-            "Device is inactive. Please check your subscription.".to_string(),
-        ));
+            match client.verify_device(&access_token, public_key).await {
+                Ok(device) => ensure_device_active(device),
+                Err(Vpn9ApiError::Unauthorized) => {
+                    clear_stored_tokens().await.map_err(DeviceApiError::Api)?;
+                    Err(DeviceApiError::Api(
+                        "Unauthorized. Please login again.".to_string(),
+                    ))
+                }
+                Err(err) => Err(DeviceApiError::from_api_error(err)),
+            }
+        }
+        Err(err) => Err(DeviceApiError::from_api_error(err)),
     }
-
-    Ok(device)
 }
 
 async fn create_device(public_key: &str) -> Result<DeviceRecord, String> {
-    let public_key_ref = Arc::new(public_key.to_string());
+    let client = api_client().map_err(map_device_error_to_string)?;
 
-    let device = execute_authorized(|client, access_token| {
-        let pk = public_key_ref.clone();
-        async move { client.register_device(access_token, pk.as_ref()).await }
-    })
-    .await
-    .map_err(|err| match err {
-        DeviceApiError::Api(message) => message,
-        DeviceApiError::NotFound => {
-            "Device registration endpoint not found. Please try again later.".to_string()
+    let mut access_token = access_token_with_refresh(4 * 3600).await?;
+
+    match client.register_device(&access_token, public_key).await {
+        Ok(device) => Ok(device),
+        Err(Vpn9ApiError::Unauthorized) => {
+            refresh_token().await?;
+            access_token = get_stored_tokens().await?.0;
+
+            match client.register_device(&access_token, public_key).await {
+                Ok(device) => Ok(device),
+                Err(Vpn9ApiError::Unauthorized) => {
+                    clear_stored_tokens().await?;
+                    Err("Unauthorized. Please login again.".to_string())
+                }
+                Err(err) => Err(map_device_error_to_string(DeviceApiError::from_api_error(
+                    err,
+                ))),
+            }
         }
-    })?;
-
-    Ok(device)
+        Err(err) => Err(map_device_error_to_string(DeviceApiError::from_api_error(
+            err,
+        ))),
+    }
 }

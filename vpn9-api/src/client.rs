@@ -7,7 +7,6 @@ use crate::models::{
 };
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client as HttpClient, RequestBuilder, StatusCode};
-use serde::de::DeserializeOwned;
 use tokio::time::sleep;
 use url::Url;
 
@@ -207,7 +206,7 @@ impl Client {
 
     async fn handle_auth_response(
         &self,
-        mut response: reqwest::Response,
+        response: reqwest::Response,
     ) -> Result<AuthResponse, ApiError> {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
@@ -222,12 +221,12 @@ impl Client {
         response
             .json::<AuthResponse>()
             .await
-            .map_err(ApiError::Deserialize)
+            .map_err(ApiError::from_reqwest_error)
     }
 
     async fn handle_device_response(
         &self,
-        mut response: reqwest::Response,
+        response: reqwest::Response,
     ) -> Result<DeviceRecord, ApiError> {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED {
@@ -249,13 +248,16 @@ impl Client {
             .json::<crate::models::CreateDeviceResponse>()
             .await
             .map(|wrapper| wrapper.device)
-            .map_err(ApiError::Deserialize)
+            .map_err(ApiError::from_reqwest_error)
     }
 
-    async fn parse_json_response<T>(&self, mut response: reqwest::Response) -> Result<T, ApiError>
+    async fn parse_json_response<T>(&self, response: reqwest::Response) -> Result<T, ApiError>
     where
         T: serde::de::DeserializeOwned,
     {
-        response.json::<T>().await.map_err(ApiError::Deserialize)
+        response
+            .json::<T>()
+            .await
+            .map_err(ApiError::from_reqwest_error)
     }
 }
