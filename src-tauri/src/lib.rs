@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod devices;
-pub mod http;
 pub mod misc;
 pub mod relays;
 pub mod util;

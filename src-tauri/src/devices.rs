@@ -4,10 +4,15 @@ use keyring::{Entry, Error as KeyringError};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::auth::{get_os_machine_id, KEYRING_SERVICE};
-use crate::http::authorized_post_json_with_refresh;
+use crate::auth::{
+    access_token_with_refresh, clear_stored_tokens, get_os_machine_id, get_stored_tokens,
+    refresh_token, API_BASE_URL, KEYRING_SERVICE,
+};
 use crate::util::short_hash;
+use vpn9_api::models::DeviceRecord;
+use vpn9_api::{ApiError as Vpn9ApiError, Client as Vpn9ApiClient};
 
 const WG_PRIVATE_KEY: &str = "wg_private_key";
 const WG_PUBLIC_KEY: &str = "wg_public_key";
@@ -160,36 +165,22 @@ mod fallback_store {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeviceRecord {
-    pub id: String,
-    pub name: String,
-    pub public_key: String,
-    pub status: String,
-    #[serde(default)]
-    pub ipv4: Option<String>,
-    #[serde(default)]
-    pub ipv6: Option<String>,
-    #[serde(default)]
-    pub allowed_ips: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VerifyDeviceResponse {
-    device: DeviceRecord,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateDeviceResponse {
-    device: DeviceRecord,
-}
-
 #[derive(Debug)]
 enum DeviceApiError {
     NotFound,
     Api(String),
+}
+
+impl DeviceApiError {
+    fn from_api_error(err: Vpn9ApiError) -> Self {
+        match err {
+            Vpn9ApiError::NotFound => DeviceApiError::NotFound,
+            Vpn9ApiError::UnprocessableEntity(body) => {
+                DeviceApiError::Api(parse_device_registration_error(&body))
+            }
+            other => DeviceApiError::Api(other.to_string()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -197,6 +188,75 @@ pub struct DeviceSyncOutcome {
     pub device: DeviceRecord,
     pub keys_regenerated: bool,
     pub newly_created: bool,
+}
+
+async fn execute_authorized<F, Fut, T>(mut operation: F) -> Result<T, DeviceApiError>
+where
+    F: FnMut(&Vpn9ApiClient, &str) -> Fut,
+    Fut: std::future::Future<Output = Result<T, Vpn9ApiError>>,
+{
+    let client =
+        Vpn9ApiClient::new(API_BASE_URL).map_err(|e| DeviceApiError::Api(e.to_string()))?;
+    let mut access_token = access_token_with_refresh(4 * 3600).await?;
+
+    match operation(&client, &access_token).await {
+        Ok(value) => Ok(value),
+        Err(Vpn9ApiError::Unauthorized) => {
+            refresh_token().await.map_err(DeviceApiError::Api)?;
+            access_token = get_stored_tokens().await.map_err(DeviceApiError::Api)?.0;
+
+            match operation(&client, &access_token).await {
+                Ok(value) => Ok(value),
+                Err(Vpn9ApiError::Unauthorized) => {
+                    clear_stored_tokens().await.map_err(DeviceApiError::Api)?;
+                    Err(DeviceApiError::Api(
+                        "Unauthorized. Please login again.".to_string(),
+                    ))
+                }
+                Err(err) => Err(DeviceApiError::from_api_error(err)),
+            }
+        }
+        Err(err) => Err(DeviceApiError::from_api_error(err)),
+    }
+}
+
+fn parse_device_registration_error(body: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(limit) = json.get("device_limit").and_then(|v| v.as_u64()) {
+            let registered = json
+                .get("devices_registered")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            return format!(
+                "Device limit reached. You have {registered}/{limit} devices registered. Remove one in VPN9 settings and try again."
+            );
+        }
+
+        if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
+            let combined = errors
+                .iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !combined.is_empty() {
+                return format!("Device registration failed: {combined}");
+            }
+        }
+
+        if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
+            return format!("Device registration failed: {error}");
+        }
+
+        if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
+            return format!("Device registration failed: {message}");
+        }
+    }
+
+    if body.trim().is_empty() {
+        "Device registration failed due to an unknown error.".to_string()
+    } else {
+        format!("Device registration failed: {body}")
+    }
 }
 
 pub async fn ensure_device_registered(
@@ -250,8 +310,7 @@ pub async fn ensure_device_registered(
         warn!("event=device.relay.ignored relay_hint_provided=true");
     }
 
-    let registration = create_device(&new_keys.1).await?;
-    let CreateDeviceResponse { device } = registration;
+    let device = create_device(&new_keys.1).await?;
 
     store_wireguard_keys(&new_keys.0, &new_keys.1).await?;
 
@@ -464,88 +523,37 @@ fn delete_secret(key: &str) -> Result<(), String> {
 }
 
 async fn verify_device(public_key: &str) -> Result<DeviceRecord, DeviceApiError> {
-    let payload = serde_json::json!({ "public_key": public_key });
-    let response =
-        authorized_post_json_with_refresh("https://vpn9.com/api/v1/devices/verify", &payload)
-            .await
-            .map_err(DeviceApiError::Api)?;
+    let public_key_ref = Arc::new(public_key.to_string());
 
-    let status = response.status();
-    if status.is_success() {
-        let device: VerifyDeviceResponse = response.json().await.map_err(|e| {
-            DeviceApiError::Api(format!("Failed to parse verification response: {e}"))
-        })?;
-        if device.device.status != "active" {
-            return Err(DeviceApiError::Api(
-                "Device is inactive. Please check your subscription.".to_string(),
-            ));
-        }
-        return Ok(device.device);
+    let device = execute_authorized(|client, access_token| {
+        let pk = public_key_ref.clone();
+        async move { client.verify_device(access_token, pk.as_ref()).await }
+    })
+    .await?;
+
+    if device.status != "active" {
+        return Err(DeviceApiError::Api(
+            "Device is inactive. Please check your subscription.".to_string(),
+        ));
     }
 
-    let body = response.text().await.unwrap_or_default();
-    if status.as_u16() == 404 {
-        return Err(DeviceApiError::NotFound);
-    }
-
-    Err(DeviceApiError::Api(format!(
-        "Device verification failed ({status}): {body}"
-    )))
+    Ok(device)
 }
 
-async fn create_device(public_key: &str) -> Result<CreateDeviceResponse, String> {
-    let mut root = serde_json::Map::new();
-    root.insert(
-        "device".to_string(),
-        serde_json::json!({
-            "public_key": public_key,
-        }),
-    );
+async fn create_device(public_key: &str) -> Result<DeviceRecord, String> {
+    let public_key_ref = Arc::new(public_key.to_string());
 
-    let payload = serde_json::Value::Object(root);
-
-    let response =
-        authorized_post_json_with_refresh("https://vpn9.com/api/v1/devices", &payload).await?;
-
-    let status = response.status();
-    if status.as_u16() == 201 || status.is_success() {
-        let registration: CreateDeviceResponse = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse device registration response: {e}"))?;
-        return Ok(registration);
-    }
-
-    let body = response.text().await.unwrap_or_default();
-
-    if status.as_u16() == 422 {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(limit) = json.get("device_limit").and_then(|v| v.as_u64()) {
-                let registered = json
-                    .get("devices_registered")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_default();
-                return Err(format!(
-                    "Device limit reached. You have {registered}/{limit} devices registered. Remove one in VPN9 settings and try again."
-                ));
-            }
-
-            if let Some(errors) = json.get("errors").and_then(|v| v.as_array()) {
-                let combined = errors
-                    .iter()
-                    .filter_map(|e| e.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if !combined.is_empty() {
-                    return Err(format!("Device registration failed: {combined}"));
-                }
-            }
-
-            if let Some(error) = json.get("error").and_then(|v| v.as_str()) {
-                return Err(format!("Device registration failed: {error}"));
-            }
+    let device = execute_authorized(|client, access_token| {
+        let pk = public_key_ref.clone();
+        async move { client.register_device(access_token, pk.as_ref()).await }
+    })
+    .await
+    .map_err(|err| match err {
+        DeviceApiError::Api(message) => message,
+        DeviceApiError::NotFound => {
+            "Device registration endpoint not found. Please try again later.".to_string()
         }
-    }
+    })?;
 
-    Err(format!("Device registration failed ({status}): {body}"))
+    Ok(device)
 }
