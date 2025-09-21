@@ -11,6 +11,71 @@ extern "C" {
 
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"])]
     fn once(event: &str, handler: &js_sys::Function) -> js_sys::Promise;
+
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"])]
+    fn listen(event: &str, handler: &js_sys::Function) -> js_sys::Promise;
+}
+
+fn apply_wireguard_event(
+    payload: WireguardEventPayload,
+    set_state: &WriteSignal<VpnConnectionState>,
+    set_info: &WriteSignal<String>,
+) {
+    let snapshot = payload.snapshot.clone();
+    let mut message = if !payload.message.is_empty() {
+        payload.message.clone()
+    } else {
+        snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.message.clone())
+            .unwrap_or_default()
+    };
+
+    if let Some(snapshot) = snapshot.as_ref() {
+        if !snapshot.server_name.is_empty() && !message.contains(&snapshot.server_name) {
+            if message.is_empty() {
+                message = format!("Server: {}", snapshot.server_name);
+            } else {
+                message = format!("{message} ({})", snapshot.server_name);
+            }
+        }
+    }
+
+    if message.is_empty() {
+        message = "WireGuard status updated".to_string();
+    }
+
+    set_info.set(message.clone());
+
+    match payload.event_type.as_str() {
+        "connect" => match payload.status.as_str() {
+            "in_progress" => set_state.set(VpnConnectionState::Connecting),
+            "failed" => set_state.set(VpnConnectionState::Error(message)),
+            "ok" => set_state.set(VpnConnectionState::Connected),
+            _ => {}
+        },
+        "disconnect" => match payload.status.as_str() {
+            "in_progress" => set_state.set(VpnConnectionState::Disconnecting),
+            "failed" => set_state.set(VpnConnectionState::Error(message)),
+            "ok" => set_state.set(VpnConnectionState::Disconnected),
+            _ => {}
+        },
+        "status" => {
+            if let Some(snapshot) = snapshot {
+                match snapshot.state.as_str() {
+                    "up" => set_state.set(VpnConnectionState::Connected),
+                    "down" => set_state.set(VpnConnectionState::Disconnected),
+                    "connecting" => set_state.set(VpnConnectionState::Connecting),
+                    "disconnecting" => set_state.set(VpnConnectionState::Disconnecting),
+                    _ => {}
+                }
+            }
+        }
+        "error" => {
+            set_state.set(VpnConnectionState::Error(message));
+        }
+        _ => {}
+    }
 }
 
 // Event payload structures
@@ -77,6 +142,36 @@ struct ActionResponse {
     message: String,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+struct WireguardSnapshotPayload {
+    state: String,
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    server_name: String,
+    #[serde(default)]
+    tx_bytes: u64,
+    #[serde(default)]
+    rx_bytes: u64,
+    #[serde(default)]
+    last_handshake_unix: u64,
+    #[serde(default)]
+    message: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+struct WireguardEventPayload {
+    request_id: String,
+    event_type: String,
+    status: String,
+    interface_name: String,
+    message: String,
+    #[serde(default)]
+    snapshot: Option<WireguardSnapshotPayload>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct AuthStatus {
     authenticated: bool,
@@ -90,6 +185,33 @@ fn VpnConnectionPanel() -> impl IntoView {
     let (selected_server, set_selected_server) = signal(None::<VpnServer>);
     let (servers, set_servers) = signal(Vec::<VpnServer>::new());
     let (connection_info, set_connection_info) = signal(String::new());
+
+    {
+        let set_connection_state = set_connection_state.clone();
+        let set_connection_info = set_connection_info.clone();
+        spawn_local(async move {
+            let handler = Closure::wrap(Box::new(move |event: JsValue| {
+                if let Ok(payload_obj) = js_sys::Reflect::get(&event, &"payload".into()) {
+                    if let Ok(json_str) = js_sys::JSON::stringify(&payload_obj) {
+                        if let Some(json) = json_str.as_string() {
+                            if let Ok(payload) =
+                                serde_json::from_str::<WireguardEventPayload>(&json)
+                            {
+                                apply_wireguard_event(
+                                    payload,
+                                    &set_connection_state,
+                                    &set_connection_info,
+                                );
+                            }
+                        }
+                    }
+                }
+            }) as Box<dyn FnMut(JsValue)>);
+
+            let _ = listen("wireguard-daemon-event", handler.as_ref().unchecked_ref());
+            handler.forget();
+        });
+    }
 
     // Load available servers on mount
     spawn_local(async move {

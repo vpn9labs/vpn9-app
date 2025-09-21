@@ -1,10 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use defguard_wireguard_rs::key::Key;
 use keyring::{Entry, Error as KeyringError};
 use log::{debug, info, warn};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use defguard_wireguard_rs::key::Key;
 
 use crate::auth::{get_os_machine_id, KEYRING_SERVICE};
 use crate::http::authorized_post_json_with_refresh;

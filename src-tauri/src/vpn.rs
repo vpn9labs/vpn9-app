@@ -16,8 +16,9 @@ pub struct VpnConnectArgs {
 mod platform {
     use std::sync::OnceLock;
 
-    use defguard_wireguard_rs::net::IpAddrMask;
-    use log::info;
+    use log::{info, warn};
+    use std::collections::HashSet;
+    use std::net::IpAddr;
     use tokio::sync::Mutex;
 
     use crate::devices::{ensure_device_registered, get_wireguard_keypair, DeviceRecord};
@@ -37,25 +38,77 @@ mod platform {
         WG_STATE.get_or_init(|| Mutex::new(None))
     }
 
-    fn parse_allowed_ips(raw: Option<&String>) -> Result<Vec<IpAddrMask>, String> {
+    fn parse_allowed_ips(raw: Option<&String>) -> Result<Vec<String>, String> {
         let Some(value) = raw else {
             return Err("Device configuration missing allowed IPs".to_string());
         };
-        let mut ips = Vec::new();
+        let mut seen = HashSet::new();
+        let mut parsed = Vec::new();
+        let mut has_default_v4 = false;
+        let mut has_default_v6 = false;
         for entry in value.split(',') {
             let trimmed = entry.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            let mask = trimmed
-                .parse::<IpAddrMask>()
-                .map_err(|_| format!("Invalid allowed IP entry returned by API: {trimmed}"))?;
-            ips.push(mask);
+            let canonical = normalize_allowed_ip(trimmed)?;
+            if canonical == "0.0.0.0/0" {
+                has_default_v4 = true;
+            } else if canonical == "::/0" {
+                has_default_v6 = true;
+            }
+            if seen.insert(canonical.clone()) {
+                parsed.push(canonical);
+            }
         }
-        if ips.is_empty() {
+        if parsed.is_empty() {
             return Err("Device configuration did not include any allowed IPs".to_string());
         }
-        Ok(ips)
+        if !has_default_v4 {
+            let default_v4 = "0.0.0.0/0".to_string();
+            if seen.insert(default_v4.clone()) {
+                warn!("event=vpn.device.allowed_ips.default_missing family=ipv4 action=inject");
+                parsed.push(default_v4);
+            }
+        }
+        if !has_default_v6 {
+            let default_v6 = "::/0".to_string();
+            if seen.insert(default_v6.clone()) {
+                warn!("event=vpn.device.allowed_ips.default_missing family=ipv6 action=inject");
+                parsed.push(default_v6);
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn normalize_allowed_ip(input: &str) -> Result<String, String> {
+        let (addr_str, cidr_str_opt) = match input.split_once('/') {
+            Some((addr, cidr)) => (addr, Some(cidr)),
+            None => (input, None),
+        };
+
+        let addr: IpAddr = addr_str
+            .parse()
+            .map_err(|_| format!("Invalid allowed IP entry returned by API: {input}"))?;
+
+        let cidr = if let Some(raw) = cidr_str_opt {
+            raw.parse::<u8>().map_err(|_| {
+                format!("Invalid CIDR suffix in allowed IP entry returned by API: {input}")
+            })?
+        } else if addr.is_ipv4() {
+            32
+        } else {
+            128
+        };
+
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        if cidr > max {
+            return Err(format!(
+                "CIDR prefix length out of range in allowed IP entry returned by API: {input}"
+            ));
+        }
+
+        Ok(format!("{addr}/{cidr}"))
     }
 
     fn build_connect_info(

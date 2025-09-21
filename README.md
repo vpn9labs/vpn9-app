@@ -251,6 +251,11 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPLv3). See the `LICENSE` file for the full license text. By contributing, you agree that your contributions are licensed under the same terms.
 
+## macOS Installer
+
+- Build the unified installer: `make package` (outputs `build/pkg/VPN9-Installer-<version>.pkg`).
+- Uninstall the app and daemon: `sudo packaging/macos/uninstall.sh`.
+
 ### Development Setup
 
 1. Fork the repository

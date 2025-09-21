@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package vpn9.daemon;
+
+message Empty {}
+
+message ConnectRequest {
+  string request_id = 1;
+  string interface_name = 2;
+  string server_id = 3;
+  string server_name = 4;
+  string endpoint = 5;
+  string peer_public_key = 6;
+  string private_key = 7;
+  repeated string allowed_ips = 8;
+  optional uint32 mtu = 9;
+  optional uint32 keepalive_seconds = 10;
+  optional string device_ipv4 = 11;
+  optional string device_ipv6 = 12;
+}
+
+message ConnectResponse {
+  string request_id = 1;
+  OperationStatus status = 2;
+  string message = 3;
+}
+
+message DisconnectRequest {
+  string request_id = 1;
+  string interface_name = 2;
+}
+
+message DisconnectResponse {
+  string request_id = 1;
+  OperationStatus status = 2;
+  string message = 3;
+}
+
+message StatusRequest {
+  string interface_name = 1;
+}
+
+message StatusSnapshot {
+  string interface_name = 1;
+  InterfaceState state = 2;
+  string server_id = 3;
+  string server_name = 4;
+  uint64 tx_bytes = 5;
+  uint64 rx_bytes = 6;
+  uint64 last_handshake_unix = 7;
+  string message = 8;
+}
+
+message Event {
+  string request_id = 1;
+  EventType type = 2;
+  OperationStatus status = 3;
+  string interface_name = 4;
+  string message = 5;
+  StatusSnapshot snapshot = 6;
+}
+
+enum OperationStatus {
+  STATUS_OK = 0;
+  STATUS_FAILED = 1;
+  STATUS_IN_PROGRESS = 2;
+}
+
+enum InterfaceState {
+  INTERFACE_STATE_DOWN = 0;
+  INTERFACE_STATE_UP = 1;
+  INTERFACE_STATE_CONNECTING = 2;
+  INTERFACE_STATE_DISCONNECTING = 3;
+}
+
+enum EventType {
+  EVENT_TYPE_CONNECT = 0;
+  EVENT_TYPE_DISCONNECT = 1;
+  EVENT_TYPE_STATUS = 2;
+  EVENT_TYPE_ERROR = 3;
+}
+
+service WireguardControl {
+  rpc StartSession(ConnectRequest) returns (ConnectResponse);
+  rpc StopSession(DisconnectRequest) returns (DisconnectResponse);
+  rpc GetStatus(StatusRequest) returns (StatusSnapshot);
+  rpc Watch(Empty) returns (stream Event);
+}

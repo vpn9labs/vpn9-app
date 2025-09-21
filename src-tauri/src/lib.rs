@@ -37,6 +37,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(log_plugin)
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            crate::wireguard::spawn_watch_task(&app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             crate::misc::greet,
             crate::misc::open_url,
