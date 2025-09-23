@@ -205,7 +205,9 @@ impl DeviceRuntime {
     pub fn shutdown(self) {
         match self {
             #[cfg(target_os = "macos")]
-            DeviceRuntime::Macos(mut handle) => handle.wait(),
+            DeviceRuntime::Macos(handle) => {
+                drop(handle);
+            }
             #[cfg(target_os = "linux")]
             DeviceRuntime::Kernel => {}
         }

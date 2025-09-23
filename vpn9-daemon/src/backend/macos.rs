@@ -155,6 +155,16 @@ fn teardown_session(
         );
     }
 
+    cleanup_uapi_socket(&interface);
+
+    if let Err(err) = teardown_interface(&interface) {
+        warn!(
+            "event=macos.interface_teardown.failed interface={} err={err}",
+            interface
+        );
+        result = Err(err);
+    }
+
     // Remove the interface from the cleanup tracker to allow reconnection
     {
         let mut tracker = cleanup_tracker().lock().unwrap();
@@ -186,7 +196,7 @@ fn wait_for_cleanup_gate(interface: &str) {
 }
 
 fn wait_for_interface_cleanup(interface: &str) -> Result<(), PlatformError> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match Command::new("ifconfig").arg(interface).status() {
             Ok(status) if status.success() => {
@@ -206,6 +216,77 @@ fn wait_for_interface_cleanup(interface: &str) -> Result<(), PlatformError> {
             }
         }
     }
+}
+
+fn teardown_interface(interface: &str) -> Result<(), PlatformError> {
+    debug!("macos backend: teardown interface interface={}", interface);
+
+    run_command_allow_absent("ifconfig", &[interface, "down"])?;
+    run_command_allow_absent("ifconfig", &[interface, "destroy"])?;
+    wait_for_interface_cleanup(interface)?;
+
+    Ok(())
+}
+
+fn cleanup_uapi_socket(interface: &str) {
+    let socket_path = format!("{UAPI_SOCKET_DIR}/{interface}.sock");
+    match fs::remove_file(&socket_path) {
+        Ok(()) => {
+            debug!(
+                "macos backend: removed UAPI socket path={} interface={}",
+                socket_path, interface
+            );
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            warn!(
+                "event=macos.uapi.cleanup_failed interface={} path={} err={err}",
+                interface, socket_path
+            );
+        }
+    }
+}
+
+fn run_command_allow_absent(cmd: &str, args: &[&str]) -> Result<(), PlatformError> {
+    debug!("macos backend: exec `{cmd}` args={args:?}");
+    let output = Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|err| PlatformError::Io(format!("failed to execute {cmd}: {err}")))?;
+
+    if output.status.success() {
+        debug!(
+            "macos backend: `{cmd}` completed status={:?}",
+            output.status
+        );
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let stdout_lower = stdout.to_ascii_lowercase();
+    let stderr_lower = stderr.to_ascii_lowercase();
+
+    if stdout.contains("does not exist")
+        || stderr.contains("does not exist")
+        || stdout_lower.contains("not found")
+        || stderr_lower.contains("not found")
+    {
+        debug!(
+            "macos backend: `{cmd}` reports missing target; treating as success stdout={:?} stderr={:?}",
+            stdout.trim(),
+            stderr.trim()
+        );
+        return Ok(());
+    }
+
+    Err(PlatformError::Api(format!(
+        "Command `{cmd}` failed (status: {:?}): stdout: {} stderr: {}",
+        output.status,
+        stdout.trim(),
+        stderr.trim()
+    )))
 }
 
 fn configure_interface(params: &ConnectParams) -> Result<(), PlatformError> {
