@@ -4,8 +4,9 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::unix::net::UnixStream,
+    panic::AssertUnwindSafe,
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -31,6 +32,7 @@ use system_configuration::{
     },
 };
 
+use crate::dns_proxy::DnsProxy;
 use crate::service::{
     AllowedIp, ConnectParams, DeviceRuntime, DnsServiceSnapshot, DnsSettings, DnsSnapshot,
     MacosRuntime, PlatformError,
@@ -50,13 +52,33 @@ const CLOUDFLARE_DNS_SERVERS: &[&str] = &[
     "2606:4700:4700::1001",
 ];
 
+fn cloudflare_upstream_socket_addrs() -> Result<Vec<SocketAddr>, PlatformError> {
+    let mut addrs = Vec::with_capacity(CLOUDFLARE_DNS_SERVERS.len());
+    for entry in CLOUDFLARE_DNS_SERVERS {
+        let ip = entry.parse::<IpAddr>().map_err(|err| {
+            PlatformError::InvalidConfig(format!(
+                "invalid Cloudflare DNS address {}: {}",
+                entry, err
+            ))
+        })?;
+        addrs.push(SocketAddr::new(ip, 53));
+    }
+    Ok(addrs)
+}
+
 static CLEANUP_TRACKER: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-pub struct PlatformBackend;
+pub struct PlatformBackend {
+    dns_proxy: Arc<DnsProxy>,
+}
 
 impl PlatformBackend {
-    pub fn new() -> Result<Self, PlatformError> {
-        Ok(Self)
+    pub async fn new() -> Result<Self, PlatformError> {
+        let upstreams = cloudflare_upstream_socket_addrs()?;
+        let proxy = DnsProxy::start(upstreams).await?;
+        Ok(Self {
+            dns_proxy: Arc::new(proxy),
+        })
     }
 
     pub fn start_session(&self, params: &ConnectParams) -> Result<DeviceRuntime, PlatformError> {
@@ -97,7 +119,8 @@ impl PlatformBackend {
             Ok(snapshot) => {
                 debug!(
                     "macos backend: DNS state captured interface={} entries={}",
-                    params.interface_name, snapshot.entries.len()
+                    params.interface_name,
+                    snapshot.entries.len()
                 );
                 snapshot
             }
@@ -112,7 +135,9 @@ impl PlatformBackend {
         };
 
         // Always attempt DNS override, even with default snapshot
-        match apply_dns_override(&params.interface_name, &mut dns_snapshot) {
+        let dns_servers = vec![self.dns_proxy.listen_addr().ip().to_string()];
+
+        match apply_dns_override(&params.interface_name, &mut dns_snapshot, &dns_servers) {
             Ok(()) => {
                 if dns_snapshot.applied_override {
                     debug!(
@@ -169,19 +194,31 @@ impl PlatformBackend {
             tracker.insert(interface.clone());
         }
         tokio::task::spawn_blocking(move || {
-            if let Err(err) =
+            let teardown_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 teardown_session(interface.clone(), peer, runtime, allowed, teardown_endpoint)
-            {
-                warn!(
-                    "event=macos.disconnect.teardown_failed interface={} err={err}",
-                    interface
-                );
-            } else {
-                debug!(
-                    "macos backend: disconnect teardown complete interface={}",
-                    interface
-                );
+            }));
+
+            match teardown_result {
+                Ok(Ok(())) => {
+                    debug!(
+                        "macos backend: disconnect teardown complete interface={}",
+                        interface
+                    );
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        "event=macos.disconnect.teardown_failed interface={} err={err}",
+                        interface
+                    );
+                }
+                Err(panic_payload) => {
+                    warn!(
+                        "event=macos.disconnect.teardown_panicked interface={} payload={:?}",
+                        interface, panic_payload
+                    );
+                }
             }
+
             cleanup_tracker().lock().unwrap().remove(&interface);
         });
 
@@ -224,9 +261,11 @@ fn teardown_session(
         result = Err(err);
     }
 
+    let mut maybe_handle = None;
+
     if let Some(runtime) = macos_runtime.take() {
         let MacosRuntime {
-            mut handle,
+            handle,
             dns_snapshot,
         } = runtime;
         if let Err(err) = restore_dns(&interface, &dns_snapshot) {
@@ -234,11 +273,7 @@ fn teardown_session(
                 result = Err(err);
             }
         }
-        handle.wait();
-        debug!(
-            "macos backend: boringtun runtime shutdown interface={}",
-            interface
-        );
+        maybe_handle = Some(handle);
     }
 
     if let Err(err) = teardown_interface(&interface) {
@@ -250,6 +285,18 @@ fn teardown_session(
     }
 
     cleanup_uapi_socket(&interface);
+
+    if let Some(mut handle) = maybe_handle {
+        debug!(
+            "macos backend: waiting for boringtun worker threads interface={}",
+            interface
+        );
+        handle.wait();
+        debug!(
+            "macos backend: boringtun runtime shutdown interface={}",
+            interface
+        );
+    }
 
     // Remove the interface from the cleanup tracker to allow reconnection
     {
@@ -431,10 +478,7 @@ fn capture_dns_state(interface: &str) -> Result<DnsSnapshot, PlatformError> {
     let mut seen = HashSet::new();
     let mut capture_errors = Vec::new();
 
-    debug!(
-        "macos backend: capturing DNS state interface={}",
-        interface
-    );
+    debug!("macos backend: capturing DNS state interface={}", interface);
 
     // Try to find services for the specific interface
     match find_services_for_interface(&store, interface) {
@@ -463,7 +507,10 @@ fn capture_dns_state(interface: &str) -> Result<DnsSnapshot, PlatformError> {
         Err(err) => {
             let error_msg = format!("Service lookup failed for interface {}: {}", interface, err);
             capture_errors.push(error_msg.clone());
-            warn!("event=macos.dns.service_lookup_failed interface={} err={}", interface, err);
+            warn!(
+                "event=macos.dns.service_lookup_failed interface={} err={}",
+                interface, err
+            );
         }
     }
 
@@ -616,19 +663,30 @@ fn build_dns_dictionary_from_settings(
     ))
 }
 
-fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(), PlatformError> {
-    if snapshot.entries.is_empty() {
+fn apply_dns_override(
+    interface: &str,
+    snapshot: &mut DnsSnapshot,
+    servers: &[String],
+) -> Result<(), PlatformError> {
+    if servers.is_empty() {
         debug!(
-            "macos backend: skipping DNS override interface={} reason=no_targets",
+            "macos backend: skipping DNS override interface={} reason=no_servers",
             interface
         );
         return Ok(());
     }
 
+    if snapshot.entries.is_empty() {
+        debug!(
+            "macos backend: DNS snapshot empty; creating interface entry interface={}",
+            interface
+        );
+    }
+
     let store = dns_store();
 
     // Validate DNS servers before applying
-    let validated_servers: Result<Vec<_>, PlatformError> = CLOUDFLARE_DNS_SERVERS
+    let validated_servers: Result<Vec<_>, PlatformError> = servers
         .iter()
         .map(|addr| validate_dns_server(addr))
         .collect();
@@ -639,13 +697,7 @@ fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(),
         .collect();
 
     // Create dictionary for primary services and global DNS
-    let primary_dictionary = build_dns_dictionary(
-        &servers,
-        None,
-        None,
-        None,
-        None,
-    );
+    let primary_dictionary = build_dns_dictionary(&servers, None, None, None, None);
 
     // Create dictionary for supplemental match (interface-specific)
     let match_domains: Vec<CFString> = vec![CFString::new("")];
@@ -666,7 +718,8 @@ fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(),
     for entry in &snapshot.entries {
         let dictionary = if entry.state_path == interface_state_path {
             &supplemental_dictionary
-        } else if entry.state_path.contains("/Global/DNS") || entry.state_path.contains("/Service/") {
+        } else if entry.state_path.contains("/Global/DNS") || entry.state_path.contains("/Service/")
+        {
             &primary_dictionary
         } else {
             continue; // Skip other types of DNS entries
@@ -681,7 +734,10 @@ fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(),
                 );
             }
             Err(err) => {
-                errors.push(format!("Failed to set DNS for {}: {}", entry.state_path, err));
+                errors.push(format!(
+                    "Failed to set DNS for {}: {}",
+                    entry.state_path, err
+                ));
                 warn!(
                     "event=macos.dns.override_failed interface={} path={} err={}",
                     interface, entry.state_path, err
@@ -691,7 +747,11 @@ fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(),
     }
 
     // If no interface-specific entry exists, create one
-    if !snapshot.entries.iter().any(|e| e.state_path == interface_state_path) {
+    if !snapshot
+        .entries
+        .iter()
+        .any(|e| e.state_path == interface_state_path)
+    {
         match set_dns_entry(&store, &interface_state_path, &supplemental_dictionary) {
             Ok(()) => {
                 snapshot.entries.push(DnsServiceSnapshot {
@@ -726,14 +786,18 @@ fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(),
     if !errors.is_empty() {
         warn!(
             "event=macos.dns.partial_override_failure interface={} applied={} errors={}",
-            interface, applied_count, errors.len()
+            interface,
+            applied_count,
+            errors.len()
         );
     }
 
     snapshot.applied_override = applied_count > 0;
     debug!(
         "macos backend: DNS override completed interface={} applied_entries={} total_entries={}",
-        interface, applied_count, snapshot.entries.len()
+        interface,
+        applied_count,
+        snapshot.entries.len()
     );
 
     Ok(())
@@ -780,7 +844,9 @@ fn restore_dns(interface: &str, snapshot: &DnsSnapshot) -> Result<(), PlatformEr
 
     debug!(
         "macos backend: DNS restore completed interface={} restored={} errors={}",
-        interface, restored_count, restore_errors.len()
+        interface,
+        restored_count,
+        restore_errors.len()
     );
 
     // If we couldn't restore any entries, return an error

@@ -1,4 +1,6 @@
 mod backend;
+#[cfg(target_os = "macos")]
+mod dns_proxy;
 mod service;
 mod signals;
 
@@ -69,8 +71,8 @@ struct InterfaceInfo {
 }
 
 impl WireguardService {
-    fn new() -> Result<Self, PlatformError> {
-        let backend = PlatformBackend::new()?;
+    async fn new() -> Result<Self, PlatformError> {
+        let backend = PlatformBackend::new().await?;
         let (tx, _) = broadcast::channel(EVENT_QUEUE_SIZE);
         Ok(Self {
             inner: Arc::new(InnerState {
@@ -668,7 +670,9 @@ async fn run() -> Result<()> {
         anyhow::anyhow!(format!("failed to subscribe to shutdown signals: {err}"))
     })?;
 
-    let service = WireguardService::new().map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let service = WireguardService::new()
+        .await
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let shutdown_service = service.clone();
     let server_service = service.clone();
 

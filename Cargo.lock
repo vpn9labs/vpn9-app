@@ -7053,6 +7053,7 @@ dependencies = [
  "hex",
  "log",
  "once_cell",
+ "rand 0.8.5",
  "signal-hook",
  "simple_logger",
  "system-configuration 0.6.1",

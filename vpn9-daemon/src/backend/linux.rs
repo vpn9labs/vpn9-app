@@ -13,7 +13,7 @@ use crate::service::{AllowedIp, ConnectParams, DeviceRuntime, PlatformError};
 pub struct PlatformBackend;
 
 impl PlatformBackend {
-    pub fn new() -> Result<Self, PlatformError> {
+    pub async fn new() -> Result<Self, PlatformError> {
         Ok(Self)
     }
 
