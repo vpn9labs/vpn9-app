@@ -9,12 +9,32 @@ use std::{
     time::{Duration, Instant},
 };
 
+use core_foundation::{
+    array::CFArray,
+    base::{CFType, TCFType, ToVoid},
+    dictionary::{CFDictionary, CFMutableDictionary},
+    number::CFNumber,
+    propertylist::{CFPropertyList, CFPropertyListSubClass},
+    string::CFString,
+};
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use boringtun::device::{DeviceConfig, DeviceHandle, Error as DeviceError};
 use hex::encode as hex_encode;
 use log::{debug, warn};
+use system_configuration::{
+    dynamic_store::{SCDynamicStore, SCDynamicStoreBuilder},
+    sys::schema_definitions::{
+        kSCPropNetDNSSearchDomains, kSCPropNetDNSServerAddresses, kSCPropNetDNSServerPort,
+        kSCPropNetDNSSupplementalMatchDomains, kSCPropNetDNSSupplementalMatchOrders,
+        kSCPropNetInterfaceDeviceName,
+    },
+};
 
-use crate::service::{AllowedIp, ConnectParams, DeviceRuntime, PlatformError};
+use crate::service::{
+    AllowedIp, ConnectParams, DeviceRuntime, DnsServiceSnapshot, DnsSettings, DnsSnapshot,
+    MacosRuntime, PlatformError,
+};
 use crate::signals;
 
 const UAPI_SOCKET_DIR: &str = "/var/run/wireguard";
@@ -22,6 +42,13 @@ const UAPI_WAIT_INTERVAL: Duration = Duration::from_millis(25);
 const UAPI_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const UAPI_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const UAPI_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+const CLOUDFLARE_DNS_SERVERS: &[&str] = &[
+    "1.1.1.1",
+    "1.0.0.1",
+    "2606:4700:4700::1111",
+    "2606:4700:4700::1001",
+];
 
 static CLEANUP_TRACKER: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -66,11 +93,57 @@ impl PlatformBackend {
         configure_interface(params)?;
         configure_peer_routes(&params.interface_name, &params.allowed_ips, params.endpoint)?;
 
+        let mut dns_snapshot = match capture_dns_state(&params.interface_name) {
+            Ok(snapshot) => {
+                debug!(
+                    "macos backend: DNS state captured interface={} entries={}",
+                    params.interface_name, snapshot.entries.len()
+                );
+                snapshot
+            }
+            Err(err) => {
+                warn!(
+                    "event=macos.dns.capture_failed interface={} err={} fallback=default_snapshot",
+                    params.interface_name, err
+                );
+                // Use default snapshot as fallback - DNS override may still work
+                DnsSnapshot::default()
+            }
+        };
+
+        // Always attempt DNS override, even with default snapshot
+        match apply_dns_override(&params.interface_name, &mut dns_snapshot) {
+            Ok(()) => {
+                if dns_snapshot.applied_override {
+                    debug!(
+                        "macos backend: DNS override applied successfully interface={}",
+                        params.interface_name
+                    );
+                } else {
+                    debug!(
+                        "macos backend: DNS override skipped interface={} reason=no_applicable_entries",
+                        params.interface_name
+                    );
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "event=macos.dns.apply_failed interface={} err={} impact=dns_may_not_work",
+                    params.interface_name, err
+                );
+                // Don't fail the entire connection for DNS issues
+                // The VPN tunnel should still work, just DNS might not be overridden
+            }
+        }
+
         debug!(
             "macos backend: session initialized interface={} server_id={}",
             params.interface_name, params.server_id
         );
-        Ok(DeviceRuntime::Macos(handle))
+        Ok(DeviceRuntime::Macos(MacosRuntime::new(
+            handle,
+            dns_snapshot,
+        )))
     }
 
     pub fn stop_session(
@@ -125,6 +198,10 @@ fn teardown_session(
 ) -> Result<(), PlatformError> {
     let mut result: Result<(), PlatformError> = Ok(());
 
+    let mut macos_runtime = runtime.map(|runtime| match runtime {
+        DeviceRuntime::Macos(rt) => rt,
+    });
+
     if let Err(err) = cleanup_peer_routes(&interface, &allowed_ips, endpoint) {
         warn!(
             "event=macos.route_cleanup.failed interface={} err={err}",
@@ -147,15 +224,22 @@ fn teardown_session(
         result = Err(err);
     }
 
-    if let Some(runtime) = runtime {
-        runtime.shutdown();
+    if let Some(runtime) = macos_runtime.take() {
+        let MacosRuntime {
+            mut handle,
+            dns_snapshot,
+        } = runtime;
+        if let Err(err) = restore_dns(&interface, &dns_snapshot) {
+            if result.is_ok() {
+                result = Err(err);
+            }
+        }
+        handle.wait();
         debug!(
             "macos backend: boringtun runtime shutdown interface={}",
             interface
         );
     }
-
-    cleanup_uapi_socket(&interface);
 
     if let Err(err) = teardown_interface(&interface) {
         warn!(
@@ -164,6 +248,8 @@ fn teardown_session(
         );
         result = Err(err);
     }
+
+    cleanup_uapi_socket(&interface);
 
     // Remove the interface from the cleanup tracker to allow reconnection
     {
@@ -287,6 +373,652 @@ fn run_command_allow_absent(cmd: &str, args: &[&str]) -> Result<(), PlatformErro
         stdout.trim(),
         stderr.trim()
     )))
+}
+
+fn dns_store() -> SCDynamicStore {
+    SCDynamicStoreBuilder::new("vpn9-daemon-dns").build()
+}
+
+fn validate_dns_server(addr_str: &str) -> Result<String, PlatformError> {
+    let addr = addr_str.parse::<IpAddr>().map_err(|err| {
+        PlatformError::InvalidConfig(format!(
+            "Invalid DNS server address '{}': {}",
+            addr_str, err
+        ))
+    })?;
+
+    // Additional validation rules
+    match addr {
+        IpAddr::V4(ipv4) => {
+            if ipv4.is_unspecified() {
+                return Err(PlatformError::InvalidConfig(
+                    "DNS server cannot be 0.0.0.0".to_string(),
+                ));
+            }
+            if ipv4.is_broadcast() {
+                return Err(PlatformError::InvalidConfig(
+                    "DNS server cannot be broadcast address".to_string(),
+                ));
+            }
+            if ipv4.is_multicast() {
+                return Err(PlatformError::InvalidConfig(
+                    "DNS server cannot be multicast address".to_string(),
+                ));
+            }
+        }
+        IpAddr::V6(ipv6) => {
+            if ipv6.is_unspecified() {
+                return Err(PlatformError::InvalidConfig(
+                    "DNS server cannot be ::".to_string(),
+                ));
+            }
+            if ipv6.is_multicast() {
+                return Err(PlatformError::InvalidConfig(
+                    "DNS server cannot be multicast address".to_string(),
+                ));
+            }
+        }
+    }
+
+    debug!("macos backend: validated DNS server addr={}", addr);
+    Ok(addr.to_string())
+}
+
+fn capture_dns_state(interface: &str) -> Result<DnsSnapshot, PlatformError> {
+    let store = dns_store();
+    let mut snapshot = DnsSnapshot::default();
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut capture_errors = Vec::new();
+
+    debug!(
+        "macos backend: capturing DNS state interface={}",
+        interface
+    );
+
+    // Try to find services for the specific interface
+    match find_services_for_interface(&store, interface) {
+        Ok(service_paths) if !service_paths.is_empty() => {
+            debug!(
+                "macos backend: found {} interface-specific services interface={}",
+                service_paths.len(),
+                interface
+            );
+            for (state_path, setup_path) in service_paths {
+                push_dns_snapshot(
+                    &store,
+                    &mut entries,
+                    &mut seen,
+                    state_path,
+                    Some(setup_path),
+                );
+            }
+        }
+        Ok(_) => {
+            debug!(
+                "macos backend: no interface-specific services found interface={}",
+                interface
+            );
+        }
+        Err(err) => {
+            let error_msg = format!("Service lookup failed for interface {}: {}", interface, err);
+            capture_errors.push(error_msg.clone());
+            warn!("event=macos.dns.service_lookup_failed interface={} err={}", interface, err);
+        }
+    }
+
+    // Always capture interface-specific DNS path
+    let interface_state_path = format!("State:/Network/Interface/{interface}/DNS");
+    push_dns_snapshot(&store, &mut entries, &mut seen, interface_state_path, None);
+
+    // Capture primary services
+    let primary_services = primary_service_ids(&store);
+    debug!(
+        "macos backend: found {} primary services interface={}",
+        primary_services.len(),
+        interface
+    );
+
+    for service_id in primary_services {
+        let state_path = format!("State:/Network/Service/{service_id}/DNS");
+        let setup_path = format!("Setup:/Network/Service/{service_id}/DNS");
+        push_dns_snapshot(
+            &store,
+            &mut entries,
+            &mut seen,
+            state_path,
+            Some(setup_path),
+        );
+    }
+
+    // Capture global DNS settings
+    push_dns_snapshot(
+        &store,
+        &mut entries,
+        &mut seen,
+        "State:/Network/Global/DNS".to_string(),
+        Some("Setup:/Network/Global/DNS".to_string()),
+    );
+
+    snapshot.entries = entries;
+
+    debug!(
+        "macos backend: DNS state captured interface={} entries={} errors={}",
+        interface,
+        snapshot.entries.len(),
+        capture_errors.len()
+    );
+
+    // Log capture errors but don't fail - we can still proceed with partial state
+    if !capture_errors.is_empty() {
+        warn!(
+            "event=macos.dns.capture_partial_failure interface={} errors={:?}",
+            interface, capture_errors
+        );
+    }
+
+    // Ensure we have at least some DNS entries to work with
+    if snapshot.entries.is_empty() {
+        return Err(PlatformError::Api(format!(
+            "No DNS configuration found for interface {}: {}",
+            interface,
+            if capture_errors.is_empty() {
+                "No active DNS services detected".to_string()
+            } else {
+                capture_errors.join(", ")
+            }
+        )));
+    }
+
+    Ok(snapshot)
+}
+
+fn build_dns_dictionary(
+    servers: &[CFString],
+    search_domains: Option<&[CFString]>,
+    port: Option<u16>,
+    supplemental_match_domains: Option<&[CFString]>,
+    supplemental_match_order: Option<&[CFNumber]>,
+) -> CFDictionary<CFString, CFType> {
+    let mut dict: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();
+
+    let address_key = unsafe { CFString::wrap_under_get_rule(kSCPropNetDNSServerAddresses) };
+    let addresses_array = CFArray::from_CFTypes(servers);
+    let addresses_cf = addresses_array.as_CFType();
+    dict.add(&address_key, &addresses_cf);
+
+    if let Some(domains) = search_domains {
+        if !domains.is_empty() {
+            let search_key = unsafe { CFString::wrap_under_get_rule(kSCPropNetDNSSearchDomains) };
+            let search_array = CFArray::from_CFTypes(domains);
+            let search_cf = search_array.as_CFType();
+            dict.add(&search_key, &search_cf);
+        }
+    }
+
+    if let Some(port) = port.filter(|value| *value != 53) {
+        let port_key = unsafe { CFString::wrap_under_get_rule(kSCPropNetDNSServerPort) };
+        let port_value = CFNumber::from(port as i32);
+        let port_cf = port_value.as_CFType();
+        dict.add(&port_key, &port_cf);
+    }
+
+    if let Some(domains) = supplemental_match_domains {
+        if !domains.is_empty() {
+            let match_key =
+                unsafe { CFString::wrap_under_get_rule(kSCPropNetDNSSupplementalMatchDomains) };
+            let match_array = CFArray::from_CFTypes(domains);
+            let match_cf = match_array.as_CFType();
+            dict.add(&match_key, &match_cf);
+        }
+    }
+
+    if let Some(order) = supplemental_match_order {
+        let order_key =
+            unsafe { CFString::wrap_under_get_rule(kSCPropNetDNSSupplementalMatchOrders) };
+        let order_array = CFArray::from_CFTypes(order);
+        dict.add(&order_key, &order_array.as_CFType());
+    }
+
+    dict.to_immutable()
+}
+
+fn build_dns_dictionary_from_settings(
+    settings: &DnsSettings,
+) -> Option<CFDictionary<CFString, CFType>> {
+    if settings.servers.is_empty() {
+        return None;
+    }
+
+    let server_cf: Vec<CFString> = settings
+        .servers
+        .iter()
+        .map(|addr| CFString::new(addr))
+        .collect();
+    let search_cf: Option<Vec<CFString>> = if settings.search_domains.is_empty() {
+        None
+    } else {
+        Some(
+            settings
+                .search_domains
+                .iter()
+                .map(|domain| CFString::new(domain))
+                .collect(),
+        )
+    };
+
+    Some(build_dns_dictionary(
+        &server_cf,
+        search_cf.as_ref().map(|vec| vec.as_slice()),
+        settings.port,
+        None,
+        None,
+    ))
+}
+
+fn apply_dns_override(interface: &str, snapshot: &mut DnsSnapshot) -> Result<(), PlatformError> {
+    if snapshot.entries.is_empty() {
+        debug!(
+            "macos backend: skipping DNS override interface={} reason=no_targets",
+            interface
+        );
+        return Ok(());
+    }
+
+    let store = dns_store();
+
+    // Validate DNS servers before applying
+    let validated_servers: Result<Vec<_>, PlatformError> = CLOUDFLARE_DNS_SERVERS
+        .iter()
+        .map(|addr| validate_dns_server(addr))
+        .collect();
+
+    let servers: Vec<CFString> = validated_servers?
+        .into_iter()
+        .map(|addr| CFString::new(&addr))
+        .collect();
+
+    // Create dictionary for primary services and global DNS
+    let primary_dictionary = build_dns_dictionary(
+        &servers,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    // Create dictionary for supplemental match (interface-specific)
+    let match_domains: Vec<CFString> = vec![CFString::new("")];
+    let match_order: Vec<CFNumber> = vec![CFNumber::from(100_i32)]; // Higher order for supplemental
+    let supplemental_dictionary = build_dns_dictionary(
+        &servers,
+        None,
+        None,
+        Some(match_domains.as_slice()),
+        Some(match_order.as_slice()),
+    );
+
+    let interface_state_path = format!("State:/Network/Interface/{interface}/DNS");
+    let mut applied_count = 0;
+    let mut errors = Vec::new();
+
+    // Apply DNS override to existing entries
+    for entry in &snapshot.entries {
+        let dictionary = if entry.state_path == interface_state_path {
+            &supplemental_dictionary
+        } else if entry.state_path.contains("/Global/DNS") || entry.state_path.contains("/Service/") {
+            &primary_dictionary
+        } else {
+            continue; // Skip other types of DNS entries
+        };
+
+        match set_dns_entry(&store, &entry.state_path, dictionary) {
+            Ok(()) => {
+                applied_count += 1;
+                debug!(
+                    "macos backend: DNS override applied path={} interface={}",
+                    entry.state_path, interface
+                );
+            }
+            Err(err) => {
+                errors.push(format!("Failed to set DNS for {}: {}", entry.state_path, err));
+                warn!(
+                    "event=macos.dns.override_failed interface={} path={} err={}",
+                    interface, entry.state_path, err
+                );
+            }
+        }
+    }
+
+    // If no interface-specific entry exists, create one
+    if !snapshot.entries.iter().any(|e| e.state_path == interface_state_path) {
+        match set_dns_entry(&store, &interface_state_path, &supplemental_dictionary) {
+            Ok(()) => {
+                snapshot.entries.push(DnsServiceSnapshot {
+                    state_path: interface_state_path.clone(),
+                    setup_path: None,
+                    previous_state: None,
+                    previous_setup: None,
+                });
+                applied_count += 1;
+                debug!(
+                    "macos backend: DNS override created interface_path={} interface={}",
+                    interface_state_path, interface
+                );
+            }
+            Err(err) => {
+                errors.push(format!("Failed to create interface DNS entry: {}", err));
+                warn!(
+                    "event=macos.dns.interface_create_failed interface={} err={}",
+                    interface, err
+                );
+            }
+        }
+    }
+
+    if applied_count == 0 && !errors.is_empty() {
+        return Err(PlatformError::Api(format!(
+            "Failed to apply DNS override to any entries: {}",
+            errors.join(", ")
+        )));
+    }
+
+    if !errors.is_empty() {
+        warn!(
+            "event=macos.dns.partial_override_failure interface={} applied={} errors={}",
+            interface, applied_count, errors.len()
+        );
+    }
+
+    snapshot.applied_override = applied_count > 0;
+    debug!(
+        "macos backend: DNS override completed interface={} applied_entries={} total_entries={}",
+        interface, applied_count, snapshot.entries.len()
+    );
+
+    Ok(())
+}
+
+fn restore_dns(interface: &str, snapshot: &DnsSnapshot) -> Result<(), PlatformError> {
+    if !snapshot.applied_override {
+        debug!(
+            "macos backend: skipping DNS restore interface={} reason=no_override_applied",
+            interface
+        );
+        return Ok(());
+    }
+
+    debug!(
+        "macos backend: restoring DNS state interface={} entries={}",
+        interface,
+        snapshot.entries.len()
+    );
+
+    let store = dns_store();
+    let mut restore_errors = Vec::new();
+    let mut restored_count = 0;
+
+    for entry in &snapshot.entries {
+        match restore_dns_entry(&store, entry) {
+            Ok(()) => {
+                restored_count += 1;
+                debug!(
+                    "macos backend: DNS entry restored interface={} path={}",
+                    interface, entry.state_path
+                );
+            }
+            Err(err) => {
+                let error_msg = format!("Failed to restore {}: {}", entry.state_path, err);
+                restore_errors.push(error_msg);
+                warn!(
+                    "event=macos.dns.restore_failed interface={} state_path={} err={}",
+                    interface, entry.state_path, err
+                );
+            }
+        }
+    }
+
+    debug!(
+        "macos backend: DNS restore completed interface={} restored={} errors={}",
+        interface, restored_count, restore_errors.len()
+    );
+
+    // If we couldn't restore any entries, return an error
+    if restored_count == 0 && !restore_errors.is_empty() {
+        return Err(PlatformError::Api(format!(
+            "Failed to restore any DNS entries for interface {}: {}",
+            interface,
+            restore_errors.join(", ")
+        )));
+    }
+
+    // If we had partial failures, log them but don't fail the operation
+    if !restore_errors.is_empty() {
+        warn!(
+            "event=macos.dns.restore_partial_failure interface={} restored={} errors={:?}",
+            interface, restored_count, restore_errors
+        );
+    }
+
+    Ok(())
+}
+
+fn set_dns_entry(
+    store: &SCDynamicStore,
+    path: &str,
+    dict: &CFDictionary<CFString, CFType>,
+) -> Result<(), PlatformError> {
+    let key = CFString::new(path);
+    let untyped = dict.to_untyped();
+    let plist = untyped.into_CFPropertyList();
+    if store.set_raw(key, &plist) {
+        debug!("macos backend: DNS entry set path={path}");
+        Ok(())
+    } else {
+        Err(PlatformError::Api(format!(
+            "failed to update DNS entry at {path}"
+        )))
+    }
+}
+
+fn clear_dns_entry(store: &SCDynamicStore, path: &str) {
+    let key = CFString::new(path);
+    if store.remove(key.clone()) {
+        debug!("macos backend: DNS entry removed path={path}");
+    } else {
+        debug!("macos backend: DNS entry remove skipped path={path} reason=missing");
+    }
+}
+
+fn restore_dns_entry(
+    store: &SCDynamicStore,
+    entry: &DnsServiceSnapshot,
+) -> Result<(), PlatformError> {
+    restore_single(store, &entry.state_path, entry.previous_state.as_ref())?;
+    if let Some(setup_path) = &entry.setup_path {
+        restore_single(store, setup_path, entry.previous_setup.as_ref())?;
+    }
+    Ok(())
+}
+
+fn restore_single(
+    store: &SCDynamicStore,
+    path: &str,
+    settings: Option<&DnsSettings>,
+) -> Result<(), PlatformError> {
+    if let Some(settings) = settings {
+        if let Some(dict) = build_dns_dictionary_from_settings(settings) {
+            set_dns_entry(store, path, &dict)?;
+        } else {
+            clear_dns_entry(store, path);
+        }
+    } else {
+        clear_dns_entry(store, path);
+    }
+    Ok(())
+}
+
+fn collect_strings_from_array(array: &CFArray) -> Vec<String> {
+    let mut values = Vec::with_capacity(array.len() as usize);
+    for element_ptr in array.iter() {
+        if let Some(cf_string) =
+            unsafe { CFType::wrap_under_get_rule(*element_ptr) }.downcast::<CFString>()
+        {
+            values.push(cf_string.to_string());
+        }
+    }
+    values
+}
+
+fn push_dns_snapshot(
+    store: &SCDynamicStore,
+    entries: &mut Vec<DnsServiceSnapshot>,
+    seen: &mut HashSet<String>,
+    state_path: String,
+    setup_path: Option<String>,
+) {
+    if !seen.insert(state_path.clone()) {
+        return;
+    }
+
+    let previous_state = fetch_dns(store, &state_path);
+    let previous_setup = setup_path.as_ref().and_then(|path| fetch_dns(store, path));
+
+    entries.push(DnsServiceSnapshot {
+        state_path,
+        setup_path,
+        previous_state,
+        previous_setup,
+    });
+}
+
+fn primary_service_ids(store: &SCDynamicStore) -> Vec<String> {
+    let mut ids = HashSet::new();
+    let primary_key = CFString::new("PrimaryService");
+    let candidate_paths = ["State:/Network/Global/IPv4", "State:/Network/Global/IPv6"];
+
+    for path in candidate_paths {
+        if let Some(plist) = store.get(CFString::new(path)) {
+            if let Some(dict) = CFPropertyList::downcast_into::<CFDictionary>(plist) {
+                if let Some(service_id) = dict
+                    .find(primary_key.to_void())
+                    .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+                    .and_then(|ty| ty.downcast::<CFString>())
+                {
+                    ids.insert(service_id.to_string());
+                }
+            }
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
+fn fetch_dns(store: &SCDynamicStore, path: &str) -> Option<DnsSettings> {
+    store
+        .get(CFString::new(path))
+        .and_then(CFPropertyList::downcast_into::<CFDictionary>)
+        .and_then(|dict| {
+            let servers = dict
+                .find(unsafe { kSCPropNetDNSServerAddresses }.to_void())
+                .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+                .and_then(|plist| plist.downcast::<CFArray>())
+                .map(|array| collect_strings_from_array(&array))
+                .unwrap_or_default();
+
+            if servers.is_empty() {
+                return None;
+            }
+
+            let search_domains = dict
+                .find(unsafe { kSCPropNetDNSSearchDomains }.to_void())
+                .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+                .and_then(|plist| plist.downcast::<CFArray>())
+                .map(|array| collect_strings_from_array(&array))
+                .unwrap_or_default();
+
+            let port = dict
+                .find(unsafe { kSCPropNetDNSServerPort }.to_void())
+                .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+                .and_then(|plist| plist.downcast::<CFNumber>())
+                .and_then(|number| number.to_i32())
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value != 53);
+
+            Some(DnsSettings {
+                servers,
+                search_domains,
+                port,
+            })
+        })
+}
+
+fn find_services_for_interface(
+    store: &SCDynamicStore,
+    interface: &str,
+) -> Result<Vec<(String, String)>, PlatformError> {
+    let mut matches = Vec::new();
+    let Some(state_paths) = store.get_keys("State:/Network/Service/.*/DNS") else {
+        return Ok(matches);
+    };
+
+    for state_path in state_paths.iter() {
+        let state_path_str = state_path.to_string();
+        let setup_path = match state_to_setup_path(&state_path_str) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(
+                    "event=macos.dns.path_parse_failed path={} err={err}",
+                    state_path_str
+                );
+                continue;
+            }
+        };
+
+        match interface_name(store, &state_path_str)? {
+            Some(name) if name == interface => matches.push((state_path_str, setup_path)),
+            _ => {}
+        }
+    }
+
+    Ok(matches)
+}
+
+fn interface_name(
+    store: &SCDynamicStore,
+    dns_state_path: &str,
+) -> Result<Option<String>, PlatformError> {
+    let interface_path = state_to_interface_path(dns_state_path)?;
+    Ok(store
+        .get(CFString::new(interface_path.as_str()))
+        .and_then(CFPropertyList::downcast_into::<CFDictionary>)
+        .and_then(|dict| {
+            dict.find(unsafe { kSCPropNetInterfaceDeviceName }.to_void())
+                .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+                .and_then(|cf_ty| cf_ty.downcast::<CFString>())
+                .map(|cf_str| cf_str.to_string())
+        }))
+}
+
+fn state_to_setup_path(state_path: &str) -> Result<String, PlatformError> {
+    if let Some(rest) = state_path.strip_prefix("State") {
+        Ok(format!("Setup{rest}"))
+    } else {
+        Err(PlatformError::Api(format!(
+            "unexpected DNS path format: {state_path}"
+        )))
+    }
+}
+
+fn state_to_interface_path(state_path: &str) -> Result<String, PlatformError> {
+    let setup_path = state_to_setup_path(state_path)?;
+    if let Some(prefix) = setup_path.strip_suffix("/DNS") {
+        Ok(format!("{prefix}/Interface"))
+    } else {
+        Err(PlatformError::Api(format!(
+            "unexpected DNS path format: {state_path}"
+        )))
+    }
 }
 
 fn configure_interface(params: &ConnectParams) -> Result<(), PlatformError> {

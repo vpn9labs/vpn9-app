@@ -196,20 +196,73 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, String> {
 #[allow(clippy::large_enum_variant)]
 pub enum DeviceRuntime {
     #[cfg(target_os = "macos")]
-    Macos(DeviceHandle),
+    Macos(MacosRuntime),
     #[cfg(target_os = "linux")]
     Kernel,
 }
 
 impl DeviceRuntime {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn shutdown(self) {
         match self {
             #[cfg(target_os = "macos")]
-            DeviceRuntime::Macos(handle) => {
-                drop(handle);
-            }
+            DeviceRuntime::Macos(runtime) => runtime.shutdown(),
             #[cfg(target_os = "linux")]
             DeviceRuntime::Kernel => {}
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub struct DnsSnapshot {
+    pub entries: Vec<DnsServiceSnapshot>,
+    pub applied_override: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl Default for DnsSnapshot {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            applied_override: false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub struct DnsServiceSnapshot {
+    pub state_path: String,
+    pub setup_path: Option<String>,
+    pub previous_state: Option<DnsSettings>,
+    pub previous_setup: Option<DnsSettings>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+pub struct DnsSettings {
+    pub servers: Vec<String>,
+    pub search_domains: Vec<String>,
+    pub port: Option<u16>,
+}
+
+#[cfg(target_os = "macos")]
+pub struct MacosRuntime {
+    pub handle: DeviceHandle,
+    pub dns_snapshot: DnsSnapshot,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosRuntime {
+    pub fn new(handle: DeviceHandle, dns_snapshot: DnsSnapshot) -> Self {
+        Self {
+            handle,
+            dns_snapshot,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn shutdown(self) {
+        let mut handle = self.handle;
+        handle.wait();
     }
 }
