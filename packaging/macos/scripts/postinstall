@@ -1,0 +1,52 @@
+#!/bin/bash
+set -euo pipefail
+
+SERVICE_PLIST="/Library/LaunchDaemons/com.vpn9.daemon.plist"
+SERVICE_TARGET="system/com.vpn9.daemon"
+DAEMON_PATH="/usr/local/libexec/vpn9/vpn9-daemon"
+LOG_DIR="/var/log"
+RUN_DIR="/var/run/vpn9"
+LOG_FILE="${LOG_DIR}/vpn9-daemon.log"
+ERR_FILE="${LOG_DIR}/vpn9-daemon.err"
+INSTALL_LOG="/var/log/vpn9-installer.log"
+
+touch "${INSTALL_LOG}"
+chmod 640 "${INSTALL_LOG}"
+exec >>"${INSTALL_LOG}" 2>&1
+set -x
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') postinstall: start"
+
+install -d -o root -g wheel -m 755 "${RUN_DIR}"
+install -d -o root -g wheel -m 755 "/usr/local/libexec/vpn9"
+
+if [ -f "${DAEMON_PATH}" ]; then
+  chown root:wheel "${DAEMON_PATH}"
+  chmod 755 "${DAEMON_PATH}"
+fi
+
+if [ -f "${SERVICE_PLIST}" ]; then
+  chown root:wheel "${SERVICE_PLIST}"
+  chmod 644 "${SERVICE_PLIST}"
+fi
+
+install -d -o root -g wheel -m 755 "${LOG_DIR}"
+touch "${LOG_FILE}" "${ERR_FILE}"
+chown root:wheel "${LOG_FILE}" "${ERR_FILE}"
+chmod 640 "${LOG_FILE}" "${ERR_FILE}"
+
+if command -v launchctl >/dev/null 2>&1; then
+  set +e
+  launchctl bootout "${SERVICE_TARGET}" >/dev/null 2>&1
+  launchctl enable "${SERVICE_TARGET}" >/dev/null 2>&1
+  launchctl bootstrap system "${SERVICE_PLIST}"
+  bootstrap_status=$?
+  if [ "${bootstrap_status}" -ne 0 ]; then
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') postinstall: launchctl bootstrap failed with status ${bootstrap_status}" >&2
+  else
+    launchctl kickstart -k "${SERVICE_TARGET}" >/dev/null 2>&1 || echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') postinstall: launchctl kickstart warning" >&2
+  fi
+  set -e
+fi
+
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') postinstall: done"
+exit 0

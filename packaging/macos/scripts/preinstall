@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+SERVICE_LABEL="system/com.vpn9.daemon"
+SOCKET_PATH="/var/run/vpn9/vpn9d.sock"
+INSTALL_LOG="/var/log/vpn9-installer.log"
+
+touch "${INSTALL_LOG}"
+chmod 640 "${INSTALL_LOG}"
+exec >>"${INSTALL_LOG}" 2>&1
+set -x
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') preinstall: start"
+
+if command -v launchctl >/dev/null 2>&1; then
+  launchctl bootout "${SERVICE_LABEL}" >/dev/null 2>&1 || true
+fi
+
+if [ -S "${SOCKET_PATH}" ]; then
+  rm -f "${SOCKET_PATH}"
+fi
+
+echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') preinstall: done"
+exit 0

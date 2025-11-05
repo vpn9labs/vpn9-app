@@ -35,6 +35,38 @@
       "icons/icon.ico"
     ],
     "iOS": {
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "systemd"
+        ],
+        "files": {
+          "/usr/libexec/vpn9/vpn9-daemon": "../target/release/vpn9-daemon",
+          "/usr/lib/systemd/system/vpn9-daemon.service": "../packaging/linux/systemd/vpn9-daemon.service"
+        },
+        "postInstallScript": "../packaging/linux/scripts/deb/postinst",
+        "preRemoveScript": "../packaging/linux/scripts/deb/prerm",
+        "postRemoveScript": "../packaging/linux/scripts/deb/postrm"
+      },
+      "rpm": {
+        "depends": [
+          "systemd"
+        ],
+        "files": {
+          "/usr/libexec/vpn9/vpn9-daemon": "../target/release/vpn9-daemon",
+          "/usr/lib/systemd/system/vpn9-daemon.service": "../packaging/linux/systemd/vpn9-daemon.service"
+        },
+        "postInstallScript": "../packaging/linux/scripts/rpm/post",
+        "preRemoveScript": "../packaging/linux/scripts/rpm/preun",
+        "postRemoveScript": "../packaging/linux/scripts/rpm/postun"
+      },
+      "appimage": {
+        "files": {
+          "usr/libexec/vpn9/vpn9-daemon": "../target/release/vpn9-daemon",
+          "usr/lib/systemd/system/vpn9-daemon.service": "../packaging/linux/systemd/vpn9-daemon.service"
+        }
+      }
     }
   }
 }

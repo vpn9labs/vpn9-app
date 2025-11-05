@@ -29,7 +29,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time", "fs"] }
+tokio = { version = "1", features = ["time", "fs", "macros", "rt", "sync", "net"] }
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
 sysinfo = "0.30"
@@ -42,11 +42,18 @@ log = "0.4.27"
 dirs = "5.0"
 base64 = "0.21"
 rand = "0.8"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+defguard_wireguard_rs = "0.7.7"
+vpn9-api = { path = "../vpn9-api" }
 
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
 winreg = "0.50"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+tokio-stream = "0.1"
+tonic = { version = "0.11", features = ["transport"] }
+tower = "0.4"
+vpn9-proto = { path = "../vpn9-proto" }
 
 [features]
 default = ["file-fallback-aead"]

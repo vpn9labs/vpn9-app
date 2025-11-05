@@ -3,17 +3,20 @@ use std::path::PathBuf;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use keyring::Entry;
 use log::{debug, info, warn};
+use reqwest::Error as ReqwestError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::Emitter;
 use uuid::Uuid;
 
 use crate::devices::{clear_wireguard_credentials, ensure_device_registered};
-use crate::http::{default_timeout, request_with_retry};
 use crate::util::short_hash;
+use vpn9_api::models::AuthResponse as ApiAuthResponse;
+use vpn9_api::{ApiError as Vpn9ApiError, Client as Vpn9ApiClient};
 
 pub(crate) const KEYRING_SERVICE: &str = "vpn9-client";
 const CLIENT_LABEL: &str = "vpn9-desktop";
+pub(crate) const API_BASE_URL: &str = "https://vpn9.com/api/v1";
 
 // --- Optional AEAD-encrypted file fallback (feature: file-fallback-aead) ---
 #[cfg(feature = "file-fallback-aead")]
@@ -145,40 +148,15 @@ mod aead_fallback {
     }
 }
 
-// Authentication data structures
-#[derive(Debug, Serialize, Deserialize)]
-struct AuthRequest {
-    passphrase: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_label: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AuthResponse {
-    token: String,
-    refresh_token: String,
-    expires_in: u64,
-    #[serde(default)]
-    token_type: Option<String>,
-    #[serde(default)]
-    subscription_status: Option<String>,
-    subscription_expires_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RefreshRequest {
-    refresh_token: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenClaims {
-    pub sub: String, // user_uuid
-    pub iat: u64,    // issued at
-    pub exp: u64,    // expires at
-    pub aud: String, // audience
-    pub device_id: String,
-    pub subscription_valid: bool,
-    pub subscription_expires: u64,
+    pub sub: String,         // user_uuid
+    pub iat: u64,            // issued at
+    pub exp: u64,            // expires at
+    pub aud: Option<String>, // optional audience
+    pub device_id: Option<String>,
+    pub subscription_valid: Option<bool>,
+    pub subscription_expires: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -469,8 +447,10 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
     // Emit initial status
     let _ = app.emit("login-status", "Authenticating with VPN9 servers...");
 
+    let passphrase_trimmed = passphrase.trim();
+
     // Validate passphrase is not empty
-    if passphrase.trim().is_empty() {
+    if passphrase_trimmed.is_empty() {
         let _ = app.emit(
             "login-error",
             LoginErrorPayload {
@@ -499,119 +479,31 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
         short_hash(&device_id)
     );
 
-    // Prepare authentication request
-    let auth_request = AuthRequest {
-        passphrase,
-        client_label: Some(CLIENT_LABEL.to_string()),
-    };
-
-    // Make API call to Rails backend (with timeout + minimal retry)
-    let client = match reqwest::Client::builder()
-        .timeout(default_timeout())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
+    let client = match Vpn9ApiClient::new(API_BASE_URL) {
+        Ok(client) => client,
+        Err(err) => {
             let _ = app.emit(
                 "login-error",
                 LoginErrorPayload {
-                    error: format!("Failed to build HTTP client: {e}"),
+                    error: format!("Failed to initialize API client: {err}"),
                 },
             );
             return;
         }
     };
-    let response = match request_with_retry(
-        || {
-            client
-                .post("https://vpn9.com/api/v1/auth/token") // Replace with actual API URL
-                .header("Content-Type", "application/json")
-                .json(&auth_request)
-                .timeout(default_timeout())
-        },
-        3,
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(msg) => {
-            let _ = app.emit("login-error", LoginErrorPayload { error: msg });
-            return;
-        }
-    };
 
-    if !response.status().is_success() {
-        debug!("response is not success, status: {}", response.status());
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-
-        // Parse specific error messages based on status codes
-        let error_message = match status.as_u16() {
-            401 => "Invalid passphrase. Please check your credentials and try again.".to_string(),
-            402 => "Payment required. Please check your subscription status.".to_string(),
-            403 => "Access forbidden. Your account may be suspended or inactive.".to_string(),
-            404 => "Authentication service not found. Please try again later.".to_string(),
-            429 => "Too many login attempts. Please wait a few minutes and try again.".to_string(),
-            500..=599 => "VPN9 server error. Please try again later.".to_string(),
-            _ => {
-                // Try to parse error message from response body
-                if let Ok(error_json) = serde_json::from_str::<serde_json::Value>(&error_text) {
-                    if let Some(message) = error_json.get("error").and_then(|e| e.as_str()) {
-                        message.to_string()
-                    } else if let Some(message) = error_json.get("message").and_then(|m| m.as_str())
-                    {
-                        message.to_string()
-                    } else {
-                        format!("Authentication failed: {error_text}")
-                    }
-                } else {
-                    format!("Authentication failed: {error_text}")
-                }
+    let auth_response: ApiAuthResponse =
+        match client.login(passphrase_trimmed, Some(CLIENT_LABEL)).await {
+            Ok(resp) => {
+                debug!("event=login.response success=true");
+                resp
+            }
+            Err(err) => {
+                let message = login_error_message(&err);
+                let _ = app.emit("login-error", LoginErrorPayload { error: message });
+                return;
             }
         };
-
-        let _ = app.emit(
-            "login-error",
-            LoginErrorPayload {
-                error: error_message,
-            },
-        );
-        return;
-    } else {
-        debug!("response is success");
-    }
-
-    // Get the response text without logging sensitive contents
-    let response_text = match response.text().await {
-        Ok(text) => text,
-        Err(e) => {
-            let _ = app.emit(
-                "login-error",
-                LoginErrorPayload {
-                    error: format!("Failed to read response: {e}"),
-                },
-            );
-            return;
-        }
-    };
-    // Log only metadata, not the payload (may contain tokens)
-    debug!(
-        "event=login.response received_bytes={} json_parse_attempt=true",
-        response_text.len()
-    );
-
-    let auth_response: AuthResponse = match serde_json::from_str(&response_text) {
-        Ok(resp) => resp,
-        Err(e) => {
-            let _ = app.emit(
-                "login-error",
-                LoginErrorPayload {
-                    error: format!("Failed to parse authentication response: {e}"),
-                },
-            );
-            return;
-        }
-    };
 
     // Store tokens securely
     if let Err(e) = store_tokens(&auth_response.token, &auth_response.refresh_token).await {
@@ -659,46 +551,37 @@ pub async fn login(passphrase: String, app: tauri::AppHandle) {
 
 #[tauri::command]
 pub async fn refresh_token() -> Result<String, String> {
-    // Get stored refresh token
     let (_, refresh_token) = get_stored_tokens().await?;
 
-    // Make refresh request with timeout + minimal retry
-    let client = reqwest::Client::builder()
-        .timeout(default_timeout())
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-    let response = request_with_retry(
-        || {
-            client
-                .post("https://vpn9.com/api/v1/auth/refresh") // Replace with actual API URL
-                .header("Content-Type", "application/json")
-                .json(&RefreshRequest {
-                    refresh_token: refresh_token.clone(),
-                })
-                .timeout(default_timeout())
-        },
-        3,
-    )
-    .await
-    .map_err(|e| format!("Token refresh request failed: {e}"))?;
+    let client = Vpn9ApiClient::new(API_BASE_URL)
+        .map_err(|e| format!("Failed to initialize API client: {e}"))?;
 
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        clear_stored_tokens().await?;
-        return Err(format!(
-            "Token refresh failed: {error_text}. Please login again."
-        ));
-    }
+    let auth_response = match client.refresh_token(&refresh_token).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            if matches!(err, Vpn9ApiError::Unauthorized) {
+                clear_stored_tokens().await?;
+                return Err("Token refresh failed: Unauthorized. Please login again.".to_string());
+            }
+            let message = refresh_error_message(&err);
+            return Err(message);
+        }
+    };
 
-    let auth_response: AuthResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
-
-    // Store new tokens
     store_tokens(&auth_response.token, &auth_response.refresh_token).await?;
 
     Ok("Token refreshed successfully".to_string())
+}
+
+pub(crate) async fn access_token_with_refresh(skew_seconds: i64) -> Result<String, String> {
+    let (mut access_token, _) = get_stored_tokens().await?;
+
+    if is_jwt_expired(&access_token, skew_seconds)? {
+        let _ = refresh_token().await?;
+        access_token = get_stored_tokens().await?.0;
+    }
+
+    Ok(access_token)
 }
 
 #[tauri::command]
@@ -732,4 +615,73 @@ pub async fn get_auth_status() -> Result<crate::auth::AuthStatus, String> {
         },
     };
     Ok(status)
+}
+
+fn login_error_message(err: &Vpn9ApiError) -> String {
+    match err {
+        Vpn9ApiError::Unauthorized => {
+            "Invalid passphrase. Please check your credentials and try again.".to_string()
+        }
+        Vpn9ApiError::UnexpectedStatus { status, body } => match status.as_u16() {
+            402 => "Payment required. Please check your subscription status.".to_string(),
+            403 => "Access forbidden. Your account may be suspended or inactive.".to_string(),
+            404 => "Authentication service not found. Please try again later.".to_string(),
+            429 => "Too many login attempts. Please wait a few minutes and try again.".to_string(),
+            500..=599 => "VPN9 server error. Please try again later.".to_string(),
+            _ => parse_api_error_body(body)
+                .map(|msg| format!("Authentication failed: {msg}"))
+                .unwrap_or_else(|| "Authentication failed. Please try again.".to_string()),
+        },
+        Vpn9ApiError::UnprocessableEntity(body) => parse_api_error_body(body)
+            .map(|msg| format!("Authentication failed: {msg}"))
+            .unwrap_or_else(|| "Authentication failed. Please try again.".to_string()),
+        Vpn9ApiError::NotFound => {
+            "Authentication service not found. Please try again later.".to_string()
+        }
+        Vpn9ApiError::HttpClient(inner) => describe_network_error(inner),
+        _ => format!("Authentication failed: {err}"),
+    }
+}
+
+fn refresh_error_message(err: &Vpn9ApiError) -> String {
+    match err {
+        Vpn9ApiError::Unauthorized => {
+            "Token refresh failed: Unauthorized. Please login again.".to_string()
+        }
+        Vpn9ApiError::UnexpectedStatus { status, body } => parse_api_error_body(body)
+            .map(|msg| format!("Token refresh failed ({status}): {msg}"))
+            .unwrap_or_else(|| format!("Token refresh failed ({status}). Please try again.")),
+        Vpn9ApiError::UnprocessableEntity(body) => parse_api_error_body(body)
+            .map(|msg| format!("Token refresh failed: {msg}"))
+            .unwrap_or_else(|| "Token refresh failed. Please login again.".to_string()),
+        Vpn9ApiError::HttpClient(inner) => describe_network_error(inner),
+        _ => format!("Token refresh failed: {err}"),
+    }
+}
+
+fn parse_api_error_body(body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(message) = json.get("error").and_then(|v| v.as_str()) {
+            return Some(message.to_string());
+        }
+        if let Some(message) = json.get("message").and_then(|v| v.as_str()) {
+            return Some(message.to_string());
+        }
+    }
+
+    Some(body.to_string())
+}
+
+fn describe_network_error(err: &ReqwestError) -> String {
+    if err.is_connect() {
+        "Cannot connect to VPN9 servers. Please check your internet connection.".to_string()
+    } else if err.is_timeout() {
+        "Connection to VPN9 servers timed out. Please try again.".to_string()
+    } else {
+        format!("Network error: {err}")
+    }
 }

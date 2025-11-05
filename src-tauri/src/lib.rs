@@ -1,10 +1,10 @@
 pub mod auth;
 pub mod devices;
-pub mod http;
 pub mod misc;
 pub mod relays;
 pub mod util;
 pub mod vpn;
+pub mod wireguard;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,6 +36,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(log_plugin)
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            crate::wireguard::spawn_watch_task(&app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             crate::misc::greet,
             crate::misc::open_url,

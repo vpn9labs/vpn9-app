@@ -25,4 +25,7 @@ getrandom = { version = "0.2", features = ["js"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "vpn9-daemon", "vpn9-proto", "vpn9-api"]
+
+[patch.crates-io]
+boringtun = { path = "src-tauri/vendor/boringtun-0.5.3" }

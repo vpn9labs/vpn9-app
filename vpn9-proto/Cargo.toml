@@ -1,0 +1,17 @@
+[package]
+name = "vpn9-proto"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["vpn9"]
+repository = "https://github.com/vpn9/vpn9-app"
+homepage = "https://vpn9.com"
+documentation = "https://github.com/vpn9/vpn9-app#readme"
+
+[dependencies]
+tonic = { version = "0.11", default-features = false, features = ["codegen", "transport"] }
+prost = "0.12"
+
+[build-dependencies]
+tonic-build = "0.11"
+protoc-bin-vendored = "3"

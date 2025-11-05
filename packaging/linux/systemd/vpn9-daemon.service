@@ -1,0 +1,21 @@
+[Unit]
+Description=VPN9 WireGuard control daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/vpn9/vpn9-daemon
+User=root
+Group=root
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=vpn9
+RuntimeDirectoryMode=0755
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+WorkingDirectory=/usr/libexec/vpn9
+
+[Install]
+WantedBy=multi-user.target

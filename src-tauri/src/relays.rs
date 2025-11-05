@@ -1,40 +1,24 @@
 use log::{debug, info, warn};
+use reqwest::Error as ReqwestError;
 
-use crate::http::authorized_get_with_refresh;
+use crate::auth::{
+    access_token_with_refresh, clear_stored_tokens, get_stored_tokens, refresh_token, API_BASE_URL,
+};
+use vpn9_api::{ApiError as Vpn9ApiError, Client as Vpn9ApiClient};
 
 #[tauri::command]
 pub async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
     info!("event=relays.fetch.start");
 
-    // Fetch actual server list from API with auto-refresh on 401
-    let response = authorized_get_with_refresh("https://vpn9.com/api/v1/relays").await?;
+    let response_json = fetch_relays().await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Failed to fetch servers ({status}): {error_text}"));
-    }
-
-    // Get the response text without logging sensitive contents
-    let response_text = match response.text().await {
-        Ok(text) => text,
-        Err(e) => {
-            return Err(format!("Failed to read response: {e}"));
-        }
-    };
-    // Log only metadata, not the payload
+    let response_size = serde_json::to_vec(&response_json)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
     debug!(
         "event=relays.response received_bytes={} json_parse_attempt=true",
-        response_text.len()
+        response_size
     );
-
-    // Parse the JSON response with the expected structure
-    let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
-        Ok(data) => data,
-        Err(e) => {
-            return Err(format!("Failed to parse server response: {e}"));
-        }
-    };
 
     // Extract and flatten the nested structure: countries -> cities -> relays
     let mut servers = Vec::new();
@@ -151,4 +135,60 @@ pub async fn get_vpn_servers() -> Result<Vec<serde_json::Value>, String> {
 
     info!("event=relays.parsed count={}", servers.len());
     Ok(servers)
+}
+
+async fn fetch_relays() -> Result<serde_json::Value, String> {
+    let client = Vpn9ApiClient::new(API_BASE_URL)
+        .map_err(|e| format!("Failed to initialize API client: {e}"))?;
+
+    let mut access_token = access_token_with_refresh(4 * 3600).await?;
+
+    match client.list_relays(&access_token).await {
+        Ok(data) => Ok(data),
+        Err(Vpn9ApiError::Unauthorized) => {
+            let _ = refresh_token().await?;
+            access_token = get_stored_tokens().await?.0;
+
+            match client.list_relays(&access_token).await {
+                Ok(data) => Ok(data),
+                Err(Vpn9ApiError::Unauthorized) => {
+                    clear_stored_tokens().await?;
+                    Err("Unauthorized. Please login again.".to_string())
+                }
+                Err(err) => Err(relay_error_message(&err)),
+            }
+        }
+        Err(err) => Err(relay_error_message(&err)),
+    }
+}
+
+fn relay_error_message(err: &Vpn9ApiError) -> String {
+    match err {
+        Vpn9ApiError::Unauthorized => "Unauthorized. Please login again.".to_string(),
+        Vpn9ApiError::HttpClient(inner) => describe_network_error(inner),
+        Vpn9ApiError::UnexpectedStatus { status, body } => {
+            if body.trim().is_empty() {
+                format!("Failed to fetch servers ({status}). Please try again.")
+            } else {
+                format!("Failed to fetch servers ({status}): {body}")
+            }
+        }
+        Vpn9ApiError::UnprocessableEntity(body) => {
+            format!("Failed to fetch servers: {body}")
+        }
+        Vpn9ApiError::NotFound => {
+            "Server list endpoint not found. Please try again later.".to_string()
+        }
+        _ => format!("Failed to fetch servers: {err}"),
+    }
+}
+
+fn describe_network_error(err: &ReqwestError) -> String {
+    if err.is_connect() {
+        "Cannot connect to VPN9 servers. Please check your internet connection.".to_string()
+    } else if err.is_timeout() {
+        "Connection to VPN9 servers timed out. Please try again.".to_string()
+    } else {
+        format!("Network error: {err}")
+    }
 }

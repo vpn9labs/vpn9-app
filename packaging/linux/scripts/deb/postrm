@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+SOCKET_PATH=/var/run/vpn9/vpn9d.sock
+RUN_DIR=/var/run/vpn9
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+if [ -S "$SOCKET_PATH" ]; then
+  rm -f "$SOCKET_PATH"
+fi
+
+case "${1:-}" in
+  purge)
+    if [ -d "$RUN_DIR" ]; then
+      rmdir "$RUN_DIR" >/dev/null 2>&1 || true
+    fi
+    ;;
+  *)
+    :
+    ;;
+ esac
+
+exit 0
