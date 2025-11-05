@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+DAEMON_PATH=/usr/libexec/vpn9/vpn9-daemon
+SERVICE_PATH=/usr/lib/systemd/system/vpn9-daemon.service
+RUN_DIR=/var/run/vpn9
+SOCKET_PATH=/var/run/vpn9/vpn9d.sock
+
+install -d -o root -g root -m 755 /usr/libexec/vpn9
+install -d -o root -g root -m 755 "$RUN_DIR"
+
+if [ -S "$SOCKET_PATH" ]; then
+  rm -f "$SOCKET_PATH"
+fi
+
+if [ -f "$DAEMON_PATH" ]; then
+  chown root:root "$DAEMON_PATH"
+  chmod 755 "$DAEMON_PATH"
+fi
+
+if [ -f "$SERVICE_PATH" ]; then
+  chown root:root "$SERVICE_PATH"
+  chmod 644 "$SERVICE_PATH"
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+  systemctl enable vpn9-daemon.service || true
+  systemctl restart vpn9-daemon.service || systemctl start vpn9-daemon.service || true
+else
+  echo "systemctl not available; vpn9-daemon will not be managed automatically" >&2
+fi
+
+exit 0
